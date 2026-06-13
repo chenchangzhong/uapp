@@ -383,13 +383,17 @@ export default function (inputArgs) {
 
   // commands:
   // 先判断 projectType, webapp, android, ios
-  // webapp 时支持: uapp run dev:* , uapp run build:*
-  // app 时仅支持: uapp run build:app*
+  // webapp 时支持: uapp run dev:* , uapp run build:* , uapp run test:*
+  // app 时支持: uapp run build:app* , uapp run test:app-*
   if (cmd === 'run') {
     console.log('当前工程类型为 ' + chalk.yellow($G.projectType + ', vue' + $G.manifest.vueVersion))
 
     if ($G.projectType !== 'webapp' && $G.args.release?.split('.').pop() === 'wgt') {
       return console.log('命令无效，仅支持在 webapp 工程下打包为 wgt格式')
+    }
+
+    if (args.argv.remain[1]?.startsWith('test:')) {
+      return runUniAppTest(args.argv.remain[1])
     }
 
     if ($G.projectType === 'webapp') {
@@ -526,9 +530,13 @@ function loadManifest() {
     $G.manifest.vueVersion = 2
   }
 
+  const runArg = $G.args.argv.remain[1] || ''
   if (
     !['android', 'ios'].includes($G.projectType) &&
-    ($G.args.argv.remain[0] === 'run' && !$G.args.argv.remain[1].includes(':app'))
+    (
+      $G.args.argv.remain[0] === 'run' &&
+      (runArg.startsWith('test:') || !runArg.includes(':app'))
+    )
   ) {
     return
   }
@@ -861,18 +869,30 @@ function printAndroidKeyInfo(gradle) {
   console.log(r[0])
 }
 
-function buildWebApp(buildArg) {
+function printHBuilderXDirNotFound() {
+  console.log('找不到 HBuilderX 安装路径')
+  console.log('配置 HBuilderX 环境命令: ' + chalk.yellow('uapp config hbx.dir [path/to/HBuilderX]'))
+}
+
+function resolveHBuilderXDir(options = {}) {
+  const { useInternalDir = true, exitOnMissing = true } = options
   let hbxDir = $G.config['hbx.dir']
-  if (!fs.existsSync(hbxDir)) {
-    console.log('找不到 HBuilderX 安装路径')
-    console.log('配置 HBuilderX 环境命令: ' + chalk.yellow('uapp config hbx.dir [path/to/HBuilderX]'))
-    process.exit()
+  if (!hbxDir || !fs.existsSync(hbxDir)) {
+    printHBuilderXDirNotFound()
+    if (exitOnMissing) process.exit()
+    return ''
   }
 
-  if (process.platform === 'darwin' && fs.existsSync(path.join(hbxDir, 'Contents/HBuilderX'))) {
-    hbxDir = path.join(hbxDir, 'Contents/HBuilderX')
+  const internalDir = path.join(hbxDir, 'Contents/HBuilderX')
+  if (useInternalDir && process.platform === 'darwin' && fs.existsSync(internalDir)) {
+    return internalDir
   }
 
+  return hbxDir
+}
+
+function buildWebApp(buildArg) {
+  let hbxDir = resolveHBuilderXDir()
   let node = path.join(hbxDir, 'plugins/node/node')
   if (process.platform === 'win32') {
     node = node + '.exe'
@@ -1013,24 +1033,262 @@ function zipDirectory(sourceDir, outPath) {
   })
 }
 
+const uniAppTestTargets = {
+  'web-chrome': { platform: 'h5-chrome', browser: 'chromium', info: 'web chrome' },
+  'web-firefox': { platform: 'h5-firefox', browser: 'firefox', info: 'web firefox' },
+  'web-safari': { platform: 'h5-safari', browser: 'webkit', info: 'web safari' },
+  'mp-weixin': { platform: 'mp-weixin' },
+  'app-android': { platform: 'android', os: 'android', uniPlatform: 'app-plus' },
+  'app-ios-simulator': { platform: 'ios', os: 'ios', uniPlatform: 'app-plus' },
+  'app-ios': { platform: 'ios', os: 'ios', uniPlatform: 'app-plus' },
+  'app-harmony': { platform: 'harmony', os: 'harmony', uniPlatform: 'app-harmony' }
+}
+
+function runUniAppTest(testArg) {
+  const testName = testArg.split(':')[1]
+  const target = uniAppTestTargets[testName]
+  if (!target) {
+    console.log(`不支持测试平台 ${testName}, 当前支持的平台有: ${Object.keys(uniAppTestTargets).join(', ')}`)
+    return
+  }
+
+  const options = parseUniAppTestArgs($G.args.argv.original.slice(2))
+  if (options.project) {
+    $G.webAppDir = path.resolve(options.project)
+  }
+
+  return runUniAppJestTest({ ...target, name: testName }, options)
+}
+
+function parseUniAppTestArgs(args) {
+  const options = {}
+  for (let i = 0; i < args.length; i++) {
+    if (!args[i].startsWith('--')) continue
+    const [key, value] = args[i].slice(2).split(/=(.*)/s)
+    if (value !== undefined) {
+      options[key] = value
+    } else if (args[i + 1] && !args[i + 1].startsWith('--')) {
+      options[key] = args[++i]
+    } else {
+      options[key] = true
+    }
+  }
+  return options
+}
+
+function runUniAppJestTest(target, options = {}) {
+  const hbx = resolveHBuilderXRuntime()
+  const projectPath = path.resolve($G.webAppDir)
+  const envFile = path.join(projectPath, 'env.js')
+  const deviceId = getUniAppTestDeviceId(options)
+
+  ensureUniAppTestConfig(projectPath, hbx)
+  updateUniAppTestDevice(envFile, target, deviceId, hbx)
+
+  const outputFile = getUniAppTestReportFile(projectPath, target.platform, deviceId)
+  const env = {
+    HOME: process.env.HOME,
+    PATH: ['./node_modules/.bin', process.env.PATH, path.dirname(hbx.node)].filter(Boolean).join(path.delimiter),
+    NODE_PATH: hbx.testNodeModules,
+    NO_COLOR: true,
+    UNI_CLI_PATH: hbx.uniCliPath,
+    UNI_AUTOMATOR_CONFIG: envFile,
+    UNI_PLATFORM: target.uniPlatform || (target.platform.startsWith('h5-') ? 'h5' : target.platform),
+    HX_Version: hbx.version,
+    uniTestProjectName: path.basename(projectPath),
+    uniTestPlatformInfo: target.info || target.platform,
+    UNI_AUTOMATOR_PORT: options.port || 9520,
+    HX_CONFIG_ADB_PATH: $G.config['adb.path'] || '',
+    UNIAPPX_KOTLIN_COMPILER_MEMORY: $G.config['uniappx.kotlin.compiler.memory'] || 2048,
+    NODE_OPTIONS: process.env.NODE_OPTIONS || '--max-old-space-size=3072',
+    UNI_NODE_PATH: hbx.node,
+    ...loadUniTestCustomEnv(envFile)
+  }
+
+  if (target.os) env.UNI_OS_NAME = target.os
+  if (target.browser) {
+    env.BROWSER = target.browser
+  }
+  if (deviceId && target.os) env.UNI_AUTOMATOR_DEVICE_ID = deviceId
+  if (options.debug) env.DEBUG = 'automator:*'
+
+  const cmd = [
+    hbx.jest,
+    '-i',
+    '--forceExit',
+    '--json',
+    `--outputFile=${outputFile}`,
+    `--env=${hbx.automatorEnv}`,
+    `--globalTeardown=${hbx.automatorTeardown}`
+  ]
+  if (options.testcaseFile) {
+    const testFile = path.join(projectPath, options.testcaseFile)
+    if (!fs.existsSync(testFile)) {
+      console.log('测试用例文件不存在: ' + testFile)
+      process.exit(1)
+    }
+    cmd.push(options.testcaseFile)
+  }
+
+  const p = spawn(hbx.node, cmd, { cwd: projectPath, env, stdio: 'inherit' })
+  p.on('close', code => {
+    process.exit(code || 0)
+  })
+  p.on('error', error => {
+    console.log(error.message)
+    process.exit(1)
+  })
+}
+
+function resolveHBuilderXRuntime() {
+  let hbxDir = resolveHBuilderXDir()
+  let node = path.join(hbxDir, 'plugins/node/node')
+
+  if (process.platform === 'win32') node += '.exe'
+  if (!fs.existsSync(node)) node = $G.config.node
+
+  if (!node || !fs.existsSync(node)) {
+    console.log('找不到 node 位置: ' + node)
+    console.log('配置 node: ' + chalk.yellow('uapp config node [path/to/node]'))
+    process.exit()
+  }
+
+  const versionFile = path.join(hbxDir, 'plugins/about/package.json')
+  const uniCliPath = path.join(hbxDir, Number($G.manifest.vueVersion) === 3 ? 'plugins/uniapp-cli-vite' : 'plugins/uniapp-cli')
+  const testPluginPath = path.join(hbxDir, 'plugins/hbuilderx-for-uniapp-test')
+  const testLibPath = path.join(hbxDir, 'plugins/hbuilderx-for-uniapp-test-lib')
+  const runtime = {
+    dir: hbxDir,
+    node,
+    version: fs.existsSync(versionFile) ? require(versionFile).version.split('.').slice(0, 2).join('.') : '3.x',
+    uniCliPath,
+    testPluginPath,
+    testLibPath,
+    testNodeModules: path.join(testLibPath, 'node_modules'),
+    jest: path.join(testLibPath, 'node_modules/jest/bin/jest.js'),
+    automatorEnv: path.join(uniCliPath, 'node_modules/@dcloudio/uni-automator/dist/environment.js'),
+    automatorTeardown: path.join(uniCliPath, 'node_modules/@dcloudio/uni-automator/dist/teardown.js')
+  }
+
+  ensureUniAppTestDependency(runtime.testPluginPath, [
+    '未找到 HBuilderX 自动化测试插件 hbuilderx-for-uniapp-test。',
+    '请通过 HBuilderX 插件市场安装「uni-app自动化测试」插件。',
+    '插件地址: https://ext.dcloud.net.cn/plugin?id=5708'
+  ])
+  ensureUniAppTestDependency(runtime.testLibPath, [
+    '未找到 HBuilderX 自动化测试依赖库 hbuilderx-for-uniapp-test-lib。',
+    '该目录由「uni-app自动化测试」插件初始化测试环境时创建。',
+    '请在 HBuilderX 中点击菜单【运行 - uni-app自动化测试辅助插件 - 重装测试环境依赖】。'
+  ])
+  ensureUniAppTestDependency(runtime.jest, '未找到 HBuilderX 内置 Jest，请在 HBuilderX 中点击菜单【运行 - uni-app自动化测试辅助插件 - 重装测试环境依赖】。')
+  ensureUniAppTestDependency(runtime.automatorEnv, '未找到 uni-automator environment.js，请确认 uni-app 编译器插件安装完整。')
+  ensureUniAppTestDependency(runtime.automatorTeardown, '未找到 uni-automator teardown.js，请确认 uni-app 编译器插件安装完整。')
+
+  return runtime
+}
+
+function ensureUniAppTestDependency(file, message) {
+  if (fs.existsSync(file)) return
+  console.log('找不到 HBuilderX 自动化测试依赖: ' + file)
+  ;(Array.isArray(message) ? message : [message]).forEach(line => console.log(line))
+  process.exit(1)
+}
+
+function ensureUniAppTestConfig(projectPath, hbx) {
+  for (const file of ['env.js', 'jest.config.js']) {
+    const targetFile = path.join(projectPath, file)
+    if (fs.existsSync(targetFile)) continue
+    const templateFile = path.join(hbx.testPluginPath, 'src/template', file)
+    if (!fs.existsSync(templateFile)) {
+      console.log('找不到 HBuilderX 自动化测试模板: ' + templateFile)
+      process.exit(1)
+    }
+    sync(templateFile, targetFile, { delete: true })
+    console.log(chalk.green('已创建自动化测试配置: ' + targetFile))
+  }
+}
+
+function getUniAppTestReportFile(projectPath, testPlatform, deviceId) {
+  const reportDir = path.join(projectPath, '.hbuilderx/test-report', testPlatform)
+  fs.mkdirSync(reportDir, { recursive: true })
+  const pad = value => String(value).padStart(2, '0')
+  const now = new Date()
+  const timestamp = [
+    now.getFullYear(),
+    pad(now.getMonth() + 1),
+    pad(now.getDate()),
+    pad(now.getHours()),
+    pad(now.getMinutes()),
+    pad(now.getSeconds())
+  ].join('')
+  return path.join(reportDir, `${deviceId ? deviceId + '-' : ''}${timestamp}.json`)
+}
+
+function loadUniTestCustomEnv(envFile) {
+  try {
+    delete require.cache[require.resolve(envFile)]
+    const envConfig = require(envFile)
+    return _.isPlainObject(envConfig?.UNI_TEST_CUSTOM_ENV) ? envConfig.UNI_TEST_CUSTOM_ENV : {}
+  } catch {
+    return {}
+  }
+}
+
+function getUniAppTestDeviceId(options) {
+  return options.device_id || options['device-id'] || options.deviceId || ''
+}
+
+function updateUniAppTestDevice(envFile, target, deviceId, hbx) {
+  const testPlatform = target.platform
+  if (!['android', 'ios', 'harmony'].includes(testPlatform)) return
+  try {
+    delete require.cache[require.resolve(envFile)]
+    const envConfig = require(envFile)
+    const appPlusPath = ['app-plus']
+    if (!_.isPlainObject(_.get(envConfig, appPlusPath))) {
+      _.set(envConfig, appPlusPath, {})
+    }
+
+    if (deviceId) {
+      _.set(envConfig, [...appPlusPath, testPlatform, 'id'], deviceId)
+    }
+    if (!envConfig['is-custom-runtime']) {
+      _.set(envConfig, [...appPlusPath, testPlatform, 'executablePath'], getUniAppTestLauncherPath(hbx.dir, target))
+      _.set(envConfig, [...appPlusPath, 'version'], path.join(hbx.dir, 'plugins/launcher/base/version.txt'))
+    }
+
+    fs.writeFileSync(envFile, 'module.exports = ' + JSON.stringify(envConfig, null, 4))
+  } catch {
+    console.log(envFile + ' 测试配置文件, 可能存在语法错误，请检查。')
+    process.exit(1)
+  }
+}
+
+function getUniAppTestLauncherPath(hbxDir, target) {
+  const launcherBase = path.join(hbxDir, 'plugins/launcher/base')
+  if (target.platform === 'android') return path.join(launcherBase, 'android_base.apk')
+  if (target.platform === 'ios') {
+    return path.join(launcherBase, target.name === 'app-ios' ? 'iPhone_base.ipa' : 'Pandora_simulator.app')
+  }
+  return $G.config['harmony.devTools.path'] || ''
+}
+
 function runHBuilderXCli(args) {
+  const hbxDir = resolveHBuilderXDir({ useInternalDir: false, exitOnMissing: false })
+  if (!hbxDir) return
+
   let cli = 'cli'
   if (process.platform === 'darwin') {
-    if (fs.existsSync(path.join($G.config['hbx.dir'], '../MacOS/cli'))) {
+    if (fs.existsSync(path.join(hbxDir, '../MacOS/cli'))) {
       cli = '../MacOS/cli'
     } else {
       cli = 'Contents/MacOS/cli'
     }
   }
-  cli = path.join($G.config['hbx.dir'], cli)
+  cli = path.join(hbxDir, cli)
 
   if (process.platform === 'win32') {
     cli = cli + '.exe'
-  }
-
-  if (!fs.existsSync($G.config['hbx.dir'])) {
-    console.log('找不到 HBuilderX 安装路径')
-    return console.log('配置 HBuilderX 环境命令: ' + chalk.yellow('uapp config hbx.dir [path/to/HBuilderX]'))
   }
 
   console.log(cli)

@@ -14,6 +14,16 @@ uapp 通用命令🔥
     uapp run build:mp-weixin --open # 参数 open 表示使用微信开发者工具打开
     uapp run build:app -r uapp.wgt  # 打包为 uapp.wgt
 
+  - 使用 HBuilderX 内置 Node/Jest 自动化测试
+    uapp run test:web-chrome
+    uapp run test:web-firefox
+    uapp run test:web-safari
+    uapp run test:mp-weixin
+    uapp run test:app-android
+    uapp run test:app-ios-simulator
+    uapp run test:app-ios
+    uapp run test:app-harmony
+
   - app 工程下命令
     uapp run build:app                # 编译并发布自定义基座到 HBuilderX 下
     uapp run build:app --release apk  # 编译 release 发布包

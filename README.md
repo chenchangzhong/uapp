@@ -87,6 +87,23 @@ uapp run build:mp-weixin
 uapp run build:electron
 ```
 
+**自动化测试**
+
+```shell
+# 使用 HBuilderX 内置 Node/Jest 自动化测试
+uapp run test:web-chrome
+uapp run test:web-firefox
+uapp run test:web-safari
+uapp run test:mp-weixin
+uapp run test:app-android
+uapp run test:app-ios-simulator
+uapp run test:app-ios
+uapp run test:app-harmony
+```
+
+测试 API 文档:   
+https://uniapp.dcloud.net.cn/worktile/auto/api.html
+
 👇 **uapp 编译微信小程序并打开工程**
 
 ![mp-weixin build](https://uappx.oss-cn-hangzhou.aliyuncs.com/repo/weixin.gif)
