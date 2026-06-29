@@ -39,10 +39,12 @@ const knownOpts = {
   webapp: Boolean,
   prepare: Boolean,
   out: path,
+  debug: String,
   release: String
 }
 
 const shortHands = {
+  d: '--debug',
   r: '--release',
   o: '--out',
   v: '--version',
@@ -74,7 +76,7 @@ export default function (inputArgs) {
   }
 
   if (args.webapp === undefined) {
-    args.webapp = true
+    args.webapp = false
   }
 
   if (args.prepare === undefined) {
@@ -422,34 +424,79 @@ export default function (inputArgs) {
         prepareCommand()
       }
 
+      const buildType = args.argv.remain[2] || 'dev'
+
       if ($G.projectType === 'android') {
-        let buildType = 'dev'
-        if (['apk', 'aab'].includes(args.release)) {
-          buildType = args.release
+        const assembleTypeMap = {
+          apk: 'assembleOriginRelease',
+          'apk:huawei': 'assembleHuaweiRelease',
+          'apk:honor': 'assembleHonorRelease',
+          'apk:xiaomi': 'assembleXiaomiRelease',
+          'apk:vivo': 'assembleVivoRelease',
+          'apk:oppo': 'assembleOppoRelease',
+          'apk:meizu': 'assembleMeizuRelease',
+          dev: 'assembleOriginDebug',
+          'dev:huawei': 'assembleHuaweiDebug',
+          'dev:honor': 'assembleHonorDebug',
+          'dev:xiaomi': 'assembleXiaomiDebug',
+          'dev:vivo': 'assembleVivoDebug',
+          'dev:oppo': 'assembleOppoDebug',
+          'dev:meizu': 'assembleMeizuDebug',
+          'dev:aab': 'bundleRelease'
         }
+        const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
+        if (buildType === 'apk:all') {
+          const channels = ['origin', 'huawei', 'honor', 'xiaomi', 'vivo', 'oppo', 'meizu']
+          for (const ch of channels) {
+            const papkFileName = `app-${ch}-${$G.manifest.uapp.versionName}-release.apk`
+            const assembleType = assembleTypeMap[`apk:${ch}`] || assembleTypeMap.apk
+            execSync(`${gradle} ${assembleType} -PapkFileName=${papkFileName} -s`, {
+              stdio: 'inherit'
+            })
+          }
+          console.log('\n编译成功，安装包位置: ')
+          console.log(path.join($G.appDir, 'app/build/outputs/apk/'))
+        } else {
+          if (!assembleTypeMap[buildType]) {
+            console.log(chalk.red(`无效的构建类型: ${buildType}`))
+            console.log('示例: dev, dev:huawei, apk, apk:huawei, apk:all, aab 等')
+            return
+          }
+          const isDev = buildType.includes('dev')
+          const channel = buildType.split(':')[1] || 'origin'
+          const outFileMap = {
+            apk: `apk/${channel}/release/`,
+            dev: `apk/${channel}/debug/`,
+            aab: 'bundle/release/'
+          }
+          const suffix = buildType === 'aab' ? 'aab' : 'apk'
+          const papkFileName = `app-${channel}-${$G.manifest.uapp.versionName}-${
+            isDev ? 'debug' : 'release'
+          }.${suffix}`
+          execSync(`${gradle} ${assembleTypeMap[buildType]} -PapkFileName=${papkFileName} -s`, {
+            stdio: 'inherit'
+          })
 
-        let assembleTypeMap = {
-          'dev': 'assembleDebug',
-          'apk': 'assembleRelease',
-          'aab': 'bundleRelease'
+          const outFileMapValue = outFileMap[buildType.split(':')[0]]
+          const buildOutFile = path.join(
+            $G.appDir,
+            'app/build/outputs/',
+            `${outFileMapValue}${papkFileName}`
+          )
+
+          if (isDev && args.copy) {
+            sync(buildOutFile, path.join($G.webAppDir, 'unpackage/debug/android_debug.apk'), {
+              delete: true
+            })
+          }
+
+          console.log('\n编译成功，安装包位置: ')
+          console.log(buildOutFile)
+          if (args.argv.remain[3] === 'upload') {
+            console.log('开始上传到蒲公英平台...')
+            uploadFile(buildOutFile)
+          }
         }
-
-        let outFileMap = {
-          'dev': 'apk/debug/app-debug.apk',
-          'apk': 'apk/release/app-release.apk',
-          'aab': 'bundle/release/app-release.aab'
-        }
-
-        let gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
-        execSync(gradle + ` ${assembleTypeMap[buildType]} -s`, { stdio: 'inherit' })
-        let buildOutFile = path.join($G.appDir, 'app/build/outputs/', outFileMap[buildType])
-
-        if (buildType === 'dev' && args.copy) {
-          sync(buildOutFile, path.join($G.webAppDir, 'unpackage/debug/android_debug.apk'), { delete: true })
-        }
-
-        console.log('\n编译成功，安装包位置: ')
-        console.log(buildOutFile)
         return
       }
 
@@ -461,34 +508,88 @@ export default function (inputArgs) {
           console.log('👉 https://gitee.com/uappkit/platform/blob/main/ios/README.md')
           return
         }
-
         const name = fs.readFileSync(path.join($G.appDir, '/project.yml'), 'utf8').match(/^name:\s*(\S+)/m)[1]
-        // gererate uapp_debug.xcarchive
-        execSync(
-          `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "HBuilder" -archivePath out/uapp_debug.xcarchive archive`,
-          { stdio: 'inherit' }
-        )
-
-        // generate ipa
-        execSync(
-          'xcodebuild -exportArchive -archivePath out/uapp_debug.xcarchive -exportPath out -exportOptionsPlist config/export.plist',
-          { stdio: 'inherit' }
-        )
-
-        if (args.copy) {
-          sync(
-            path.join($G.appDir, 'out/HBuilder.ipa'),
-            path.join($G.webAppDir, 'unpackage/debug/ios_debug.ipa'),
-            { delete: true }
+        if (buildType === 'apk') {
+          // gererate uapp_test.xcarchive
+          execSync(
+            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "${name}-test" -archivePath out/${name}_test.xcarchive archive`,
+            { stdio: 'inherit' }
           )
-        }
 
-        console.log(chalk.yellow('iOS 仅支持自定义基座打包，正式发版请直接使用 xcode'))
+          // generate ipa
+          execSync(
+            `xcodebuild -exportArchive -archivePath out/${name}_test.xcarchive -exportPath out -exportOptionsPlist config/export_test.plist`,
+            { stdio: 'inherit' }
+          )
+
+          // 重命名 IPA 文件
+          const originalFilePath = path.join($G.appDir, `out/${name}-test.ipa`)
+          const newFilePath = path.join(
+            $G.appDir,
+            `out/app-${$G.manifest.uapp.versionName}-test.ipa`
+          )
+          execSync(`mv ${originalFilePath} ${newFilePath}`, { stdio: 'inherit' })
+
+          if (args.argv.remain[3] === 'upload') {
+            console.log('开始上传到蒲公英平台...')
+            uploadFile(newFilePath)
+          }
+        } else if (buildType === 'dev') {
+          // gererate uapp_debug.xcarchive
+          execSync(
+            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "HBuilder" -archivePath out/${name}_debug.xcarchive archive`,
+            { stdio: 'inherit' }
+          )
+
+          // generate ipa
+          execSync(
+            `xcodebuild -exportArchive -archivePath out/${name}_debug.xcarchive -exportPath out -exportOptionsPlist config/export_dev.plist`,
+            { stdio: 'inherit' }
+          )
+
+          if (args.copy) {
+            sync(
+              path.join($G.appDir, 'out/HBuilder.ipa'),
+              path.join($G.webAppDir, 'unpackage/debug/ios_debug.ipa'),
+              { delete: true }
+            )
+          }
+        } else if (buildType === 'devApp') {
+          execSync(
+            `arch -x86_64 xcodebuild \
+            -project ${name}.xcodeproj \
+            -destination "platform=iOS Simulator,name=iPhone 17" \
+            -scheme "HBuilder"\
+            -configuration Debug \
+            EXCLUDED_ARCHS="arm64" \
+            BUILD_LIBRARIES_FOR_DISTRIBUTION=YES \
+            build \
+            -derivedDataPath out/${name}_debug.xcarchive`,
+            { stdio: 'inherit' }
+          )
+          if (args.copy) {
+            sync(
+              path.join($G.appDir, `out/${name}_debug.xcarchive/Build/Products/Debug-iphonesimulator/HBuilder.app`),
+              path.join($G.webAppDir, 'unpackage/debug/Pandora_simulator_debug.app'),
+              { delete: true }
+            )
+          }
+        } else {
+          console.log(chalk.red(`无效的 iOS 构建类型: ${buildType}`))
+          console.log('示例: dev, apk, devApp')
+          return
+        }
+        console.log(chalk.yellow('iOS 仅支持自定义基座和测试打包，正式发版请直接使用 xcode'))
       }
     })()
   }
 
   printHelp()
+}
+
+function uploadFile(APP_PATH) {
+  console.log(chalk.yellow('uploadFile 功能暂未启用，请等待后续版本'))
+  console.log('待上传文件: ' + APP_PATH)
 }
 
 function checkForUpdates() {
@@ -570,7 +671,8 @@ function loadManifest() {
 
 function prepareCommand() {
   let compiledDir = getBuildOut()
-  if (!pathExistsSync(compiledDir)) {
+  const buildType = $G.args.argv.remain[2] || ''
+  if (!buildType.includes('dev') && !pathExistsSync(compiledDir)) {
     console.log(chalk.red('找不到本地App打包资源'))
     console.log('请使用 HBuilderX => 发行(菜单) => 原生App本地打包 => 生成本地打包App资源')
     process.exit()
@@ -599,10 +701,13 @@ function prepareCommand() {
     $G.appDir,
     $G.projectType === 'ios' ? 'Main/Pandora/apps' : 'app/src/main/assets/apps'
   )
-
-  emptyDirSync(embedAppsDir)
-  sync(compiledDir, path.join(embedAppsDir, $G.manifest.appid, 'www'))
-  console.log(chalk.green('APP打包所需资源已更新'))
+  if (buildType.includes('dev')) {
+    removeSync(path.join(embedAppsDir, $G.manifest.appid))
+  } else {
+    emptyDirSync(embedAppsDir)
+    sync(compiledDir, path.join(embedAppsDir, $G.manifest.appid, 'www'))
+    console.log(chalk.green('APP打包所需资源已更新'))
+  }
 }
 
 /*
@@ -623,42 +728,50 @@ function updateAndroidMetaData() {
   content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.versionName + '$3')
   content = content.replace(/("DCLOUD_APPKEY"\s*:\s*")(.*)(",)/, '$1' + $G.manifest.uapp.appkey + '$3')
 
-  content = content.replace(
-    /("WX_APPID"\s+:\s+")(.*)(",)/,
-    '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3'
-  )
+  const isWxAppid = !!$G.manifest['app-plus'].distribute.sdkConfigs.oauth?.weixin?.appid
+  if (isWxAppid) {
+    content = content.replace(
+      /("WX_APPID"\s+:\s+")(.*)(",)/,
+      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3'
+    )
+  }
 
-  content = content.replace(
-    /("WX_SECRET"\s+:\s+")(.*)(",)/,
-    '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3'
-  )
+  const isWxAppsecret = !!$G.manifest['app-plus'].distribute.sdkConfigs.oauth?.weixin?.appsecret
+  if (isWxAppsecret) {
+    content = content.replace(
+      /("WX_SECRET"\s+:\s+")(.*)(",)/,
+      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3'
+    )
+  }
   fs.writeFileSync(baseGradleFile, content)
 
   // DONT change content here
-  let contentOfEntryFiles = {
-    [wxEntryActivityFile]: `package ${$G.manifest.uapp.package}.wxapi;
+  if (isWxAppid && isWxAppsecret) {
+    let contentOfEntryFiles = {
+      [wxEntryActivityFile]: `package ${$G.manifest.uapp.package}.wxapi;
 import io.dcloud.feature.oauth.weixin.AbsWXCallbackActivity;
 public class WXEntryActivity extends AbsWXCallbackActivity {
 }
 `,
-    [wXPayEntryActivityFile]: `package ${$G.manifest.uapp.package}.wxapi;
+      [wXPayEntryActivityFile]: `package ${$G.manifest.uapp.package}.wxapi;
 import io.dcloud.feature.payment.weixin.AbsWXPayCallbackActivity;
 public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
 }
 `
-  }
+    }
 
-  for (const entryFile of [wxEntryActivityFile, wXPayEntryActivityFile]) {
-    let replaceFile = path.join(
-      $G.appDir,
-      'app/src/main/java/',
-      $G.manifest.uapp.package.replace(/\./g, '/'),
-      'wxapi',
-      entryFile
-    )
+    for (const entryFile of [wxEntryActivityFile, wXPayEntryActivityFile]) {
+      let replaceFile = path.join(
+        $G.appDir,
+        'app/src/main/java/',
+        $G.manifest.uapp.package.replace(/\./g, '/'),
+        'wxapi',
+        entryFile
+      )
 
-    fs.mkdirSync(path.dirname(replaceFile), { recursive: true })
-    fs.writeFileSync(replaceFile, contentOfEntryFiles[entryFile])
+      fs.mkdirSync(path.dirname(replaceFile), { recursive: true })
+      fs.writeFileSync(replaceFile, contentOfEntryFiles[entryFile])
+    }
   }
 
   replaceControlXml(path.join($G.appDir, 'app/src/debug/assets/data/dcloud_control.xml'))
@@ -724,18 +837,20 @@ function replaceInfoPlist(plistFile) {
   content = content.replace(re, '$1' + $G.manifest.uapp.appkey + '$3')
 
   // replace ios and wexin meanwhile
-  re = /(<key>UniversalLinks<\/key>\n.+?<string>)(.*?)(<\/string>)/g
-  content = content.replace(re,
-    '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.UniversalLinks + '$3')
+  if ($G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin) {
+    re = /(<key>UniversalLinks<\/key>\n.+?<string>)(.*?)(<\/string>)/g
+    content = content.replace(re,
+      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.UniversalLinks + '$3')
 
-  re = /(<key>weixin<\/key>[\s\S]+?appid<\/key>\n.+?<string>)(.*?)(<\/string>)/g
-  content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
+    re = /(<key>weixin<\/key>[\s\S]+?appid<\/key>\n.+?<string>)(.*?)(<\/string>)/g
+    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
 
-  re = /(<string>weixin<\/string>\n.+?<key>CFBundleURLSchemes<\/key>[\s\S]+?<string>)(.*?)(<\/string>)/g
-  content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
+    re = /(<string>weixin<\/string>\n.+?<key>CFBundleURLSchemes<\/key>[\s\S]+?<string>)(.*?)(<\/string>)/g
+    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
 
-  re = /(<key>weixin<\/key>[\s\S]+?appSecret<\/key>\n.+<string>)(.*?)(<\/string>)/g
-  content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3')
+    re = /(<key>weixin<\/key>[\s\S]+?appSecret<\/key>\n.+<string>)(.*?)(<\/string>)/g
+    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3')
+  }
 
   re = /(<key>CFBundleDisplayName<\/key>\n.+?<string>)(.*?)(<\/string>)/g
   if (!re.test(content)) {

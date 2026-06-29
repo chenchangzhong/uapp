@@ -25,10 +25,20 @@ uapp 通用命令🔥
     uapp run test:app-harmony
 
   - app 工程下命令
-    uapp run build:app                # 编译并发布自定义基座到 HBuilderX 下
-    uapp run build:app --release apk  # 编译 release 发布包
-    uapp run build:app -r aab         # android 下打包为 aab 的格式
-    uapp run build:app-plus -r apk    # 注意：vue2 要用 :app-plus
+    uapp run build:app                    # 编译并发布自定义基座到 HBuilderX 下
+    uapp run build:app apk                # 编译 release 发布包
+    uapp run build:app apk:huawei         # 编译华为渠道 release 包
+    uapp run build:app apk:all            # 编译所有渠道 release 包
+    uapp run build:app dev:huawei         # 编译华为渠道 debug 包
+    uapp run build:app dev:aab            # android 下打包为 aab 格式
+    uapp run build:app apk:huawei upload  # 编译后上传到蒲公英
+    uapp run build:app-plus apk           # 注意：vue2 要用 :app-plus
+
+  - iOS 工程下命令
+    uapp run build:app dev                # 编译自定义基座
+    uapp run build:app apk                # 编译测试包
+    uapp run build:app devApp             # 编译 iOS 模拟器包
+    uapp run build:app apk upload         # 编译测试包并上传蒲公英
 
   - 配置 HBuilderX 和 微信安装环境
     uapp config hbx.dir "C:\Program Files (x86)\HBuilderX"
@@ -49,7 +59,8 @@ app 工程下命令:
 
   - 更新打包用到的数据，包括版本信息, dcloudkey, App图标, 本地打包资源等
     uapp prepare build:app
-    uapp prepare build:app --no-webapp             # 不编译 webapp
+    uapp prepare build:app dev               # dev 模式，仅清理资源不检查本地打包资源
+    uapp prepare build:app --no-webapp       # 不编译 webapp
 
   - 运行自定义打包发布流程，配置见 README.md
     uapp run custom

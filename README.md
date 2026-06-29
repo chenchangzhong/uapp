@@ -101,7 +101,7 @@ uapp run test:app-ios
 uapp run test:app-harmony
 ```
 
-测试 API 文档:   
+测试 API 文档:
 https://uniapp.dcloud.net.cn/worktile/auto/api.html
 
 👇 **uapp 编译微信小程序并打开工程**
@@ -116,7 +116,7 @@ https://uniapp.dcloud.net.cn/worktile/auto/api.html
 
 第一种：通过 `uapp new` 新建工程，使用 `uapp-webapp` 模版。
 
-`uapp-webapp` 模版里集成了 unocss/tailwindcss, uvui。自带网络请求配置，可直接使用 uni.$uv.http，使用方法，可以参考模版里自带的 README 文档:  
+`uapp-webapp` 模版里集成了 unocss/tailwindcss, uvui。自带网络请求配置，可直接使用 uni.$uv.http，使用方法，可以参考模版里自带的 README 文档:
 <https://gitee.com/uappkit/platform/tree/main/src>
 
 ```bash
@@ -227,6 +227,9 @@ uapp info
 # 更新 HBuilderX 生成的App图标和本地打包资源
 uapp prepare build:app
 
+# dev 模式，仅清理资源不检查本地打包资源
+uapp prepare build:app dev
+
 # 编译APP安装包, 并发布自定义基座到 HBuilderX 下
 uapp run build:app
 
@@ -236,14 +239,48 @@ uapp run build:app -r uapp.wgt
 # vue2 要使用 app-plus，与 uniapp 一致
 uapp run build:app-plus
 
-# 编译 android apk 格式
-uapp run build:app -r apk
-
-# 编译 android aab 格式 (发布到 Google Play)
-uapp run build:app -r aab
-
 # 运行自定义打包发布流程，配置见 manifest.json => custom.command
 uapp run custom
+```
+
+### Android 多渠道打包
+
+支持 origin(默认), huawei, honor, xiaomi, vivo, oppo, meizu 渠道，格式为 `apk:渠道` 或 `dev:渠道`。
+
+```bash
+# 编译 release 发布包 (origin 渠道)
+uapp run build:app apk
+
+# 编译华为渠道 release 包
+uapp run build:app apk:huawei
+
+# 编译华为渠道 debug 包
+uapp run build:app dev:huawei
+
+# 编译所有渠道 release 包
+uapp run build:app apk:all
+
+# 打包为 aab 格式 (发布到 Google Play)
+uapp run build:app dev:aab
+
+# 编译后上传到蒲公英
+uapp run build:app apk:huawei upload
+```
+
+### iOS 构建类型
+
+```bash
+# 编译自定义基座 (默认)
+uapp run build:app dev
+
+# 编译测试包 (使用 export_test.plist)
+uapp run build:app apk
+
+# 编译 iOS 模拟器包 (x86_64, iPhone 17 Simulator)
+uapp run build:app devApp
+
+# 编译测试包并上传蒲公英
+uapp run build:app apk upload
 ```
 
 ## 四、manifest.json 相关配置
