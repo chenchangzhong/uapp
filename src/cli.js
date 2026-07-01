@@ -442,7 +442,7 @@ export default function (inputArgs) {
           'dev:vivo': 'assembleVivoDebug',
           'dev:oppo': 'assembleOppoDebug',
           'dev:meizu': 'assembleMeizuDebug',
-          'dev:aab': 'bundleRelease'
+          aab: 'bundleRelease'
         }
         const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
         if (buildType === 'apk:all') {

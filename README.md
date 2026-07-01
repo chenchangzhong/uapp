@@ -261,7 +261,7 @@ uapp run build:app dev:huawei
 uapp run build:app apk:all
 
 # 打包为 aab 格式 (发布到 Google Play)
-uapp run build:app dev:aab
+uapp run build:app aab
 
 # 编译后上传到蒲公英
 uapp run build:app apk:huawei upload

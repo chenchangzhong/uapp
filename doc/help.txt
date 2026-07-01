@@ -30,7 +30,7 @@ uapp 通用命令🔥
     uapp run build:app apk:huawei         # 编译华为渠道 release 包
     uapp run build:app apk:all            # 编译所有渠道 release 包
     uapp run build:app dev:huawei         # 编译华为渠道 debug 包
-    uapp run build:app dev:aab            # android 下打包为 aab 格式
+    uapp run build:app aab              # android 下打包为 aab 格式
     uapp run build:app apk:huawei upload  # 编译后上传到蒲公英
     uapp run build:app-plus apk           # 注意：vue2 要用 :app-plus
 
