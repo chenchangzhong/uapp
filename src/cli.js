@@ -28,6 +28,11 @@ const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const pkg = require('../package.json')
 
+function normalizeVersionName(versionName) {
+  if (versionName === undefined || versionName === null) return versionName
+  return String(versionName).split('@')[0]
+}
+
 const knownOpts = {
   version: Boolean,
   help: Boolean,
@@ -562,7 +567,7 @@ function loadManifest() {
   $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
   $G.manifest.uapp.versionName = $G.manifest.uapp[`${$G.projectType}.versionName`] || $G.manifest.versionName
   $G.manifest.uapp.versionCode = $G.manifest.uapp[`${$G.projectType}.versionCode`] || $G.manifest.versionCode
-  $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`]
+  $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
 
   // 缺失的参数，默认使用模版里的
   $G.manifest = _.merge(require(path.join($G.sdkHomeDir, '/templates/manifest.json')), $G.manifest)
@@ -612,6 +617,7 @@ function prepareCommand() {
 function updateAndroidMetaData() {
   let wxEntryActivityFile = 'WXEntryActivity.java'
   let wXPayEntryActivityFile = 'WXPayEntryActivity.java'
+  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
 
   let baseGradleFile = path.join($G.appDir, 'app/build.gradle')
   let content = fs.readFileSync(baseGradleFile, 'utf8')
@@ -620,7 +626,7 @@ function updateAndroidMetaData() {
   content = content.replace(/(applicationId\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.package + '$3')
   content = content.replace(/(app_name'\s*,\s*")(.*)(")/, '$1' + $G.manifest.uapp.name + '$3')
   content = content.replace(/(versionCode\s*(?:=\s*)?)(\d+)/, '$1' + $G.manifest.uapp.versionCode)
-  content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.versionName + '$3')
+  content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + versionName + '$3')
   content = content.replace(/("DCLOUD_APPKEY"\s*:\s*")(.*)(",)/, '$1' + $G.manifest.uapp.appkey + '$3')
 
   content = content.replace(
@@ -682,9 +688,10 @@ function updateAndroidIcons(resDir) {
 function updateIOSMetaData() {
   let baseYamlFile = path.join($G.appDir, 'config/base.yml')
   let content = fs.readFileSync(baseYamlFile, 'utf8')
+  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
 
   content = content.replace(/(PRODUCT_BUNDLE_IDENTIFIER: )(.*)/, '$1' + $G.manifest.uapp.package)
-  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionName)
+  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + versionName)
   content = content.replace(/(CURRENT_PROJECT_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionCode)
   fs.writeFileSync(baseYamlFile, content)
 
@@ -974,7 +981,9 @@ function buildWebApp(buildArg) {
       }
 
       if (['build', 'app'].every(v => $G.args.argv.remain[1].includes(v)) && $G.args.release?.split('.').pop() === 'wgt') {
-        let wgtFile = path.join($G.webAppDir, 'unpackage/release/' + path.basename($G.args.release))
+        let releaseDir = path.join($G.webAppDir, 'unpackage/release')
+        fs.mkdirSync(releaseDir, { recursive: true })
+        let wgtFile = path.join(releaseDir, path.basename($G.args.release))
         zipDirectory(buildOutDir, wgtFile).then(() => {
           console.log('\n打包成功, wgt 文件路径: ')
           console.log(wgtFile)
