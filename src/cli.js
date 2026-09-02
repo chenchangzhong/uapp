@@ -674,11 +674,17 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
 }
 
 function updateAndroidIcons(resDir) {
+  const iconFile = path.join(getIconResourceDir(resDir), '144x144.png')
   sync(
-    path.join(resDir, '144x144.png'),
+    iconFile,
     path.join($G.appDir, 'app/src/main/res/drawable-xxhdpi/icon.png')
   )
   console.log('✅ updateAndroidIcons')
+}
+
+function getIconResourceDir(resDir) {
+  const keepIcons = path.join($G.appDir, 'icons')
+  return fs.existsSync(keepIcons) && fs.statSync(keepIcons).isDirectory() ? keepIcons : resDir
 }
 
 /*
@@ -771,18 +777,19 @@ function replaceControlXml(xmlFile) {
 }
 
 function updateIOSIcons(resDir) {
-  let iconFiles = fs.readdirSync(resDir)
+  const iconResourceDir = getIconResourceDir(resDir)
+  let iconFiles = fs.readdirSync(iconResourceDir)
   iconFiles.forEach(function (file) {
     if (!file.endsWith('.png')) return
     // skip android icons
     if (['72x72.png', '96x96.png', '144x144.png', '192x192.png'].includes(file)) return
 
-    const fullPath = path.join(resDir, file)
+    const fullPath = path.join(iconResourceDir, file)
     sync(fullPath, path.join($G.appDir, '/Main/Resources/Images.xcassets/AppIcon.appiconset/', file), { delete: true })
   })
 
-  sync(path.join(resDir, '120x120.png'), path.join($G.appDir, 'Main/Resources/logo@2x.png'))
-  sync(path.join(resDir, '180x180.png'), path.join($G.appDir, 'Main/Resources/logo@3x.png'))
+  sync(path.join(iconResourceDir, '120x120.png'), path.join($G.appDir, 'Main/Resources/logo@2x.png'))
+  sync(path.join(iconResourceDir, '180x180.png'), path.join($G.appDir, 'Main/Resources/logo@3x.png'))
   console.log('✅ updateIOSIcons')
 }
 
