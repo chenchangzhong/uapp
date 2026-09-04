@@ -1101,13 +1101,19 @@ function runUniAppJestTest(target, options = {}) {
   ensureUniAppTestConfig(projectPath, hbx)
   updateUniAppTestDevice(envFile, target, deviceId, hbx)
 
+  const jestConfigSource = getJestConfigSource(projectPath)
   const outputFile = getUniAppTestReportFile(projectPath, target.platform, deviceId)
   const env = {
     HOME: process.env.HOME,
     PATH: ['./node_modules/.bin', process.env.PATH, path.dirname(hbx.node)].filter(Boolean).join(path.delimiter),
-    NODE_PATH: hbx.testNodeModules,
+    NODE_PATH: [
+      hbx.testNodeModules,
+      hbx.compilerNodeModules,
+      process.env.NODE_PATH,
+    ].filter(Boolean).join(path.delimiter),
     NO_COLOR: true,
     UNI_CLI_PATH: hbx.uniCliPath,
+    UNI_INPUT_DIR: projectPath,
     UNI_AUTOMATOR_CONFIG: envFile,
     UNI_PLATFORM: target.uniPlatform || (target.platform.startsWith('h5-') ? 'h5' : target.platform),
     HX_Version: hbx.version,
@@ -1137,6 +1143,14 @@ function runUniAppJestTest(target, options = {}) {
     `--env=${hbx.automatorEnv}`,
     `--globalTeardown=${hbx.automatorTeardown}`
   ]
+  if (!hasJestConfigOption(jestConfigSource, 'transform')) {
+    cmd.push('--transform', JSON.stringify(getDefaultJestTransform(hbx)))
+  }
+  if (!hasJestConfigOption(jestConfigSource, 'moduleNameMapper')) {
+    cmd.push('--moduleNameMapper', JSON.stringify({
+      '^~?@/(.*)$': path.join(projectPath, '$1'),
+    }))
+  }
   if (options.testcaseFile) {
     const testFile = path.join(projectPath, options.testcaseFile)
     if (!fs.existsSync(testFile)) {
@@ -1181,6 +1195,7 @@ function resolveHBuilderXRuntime() {
     testPluginPath,
     testLibPath,
     testNodeModules: path.join(testLibPath, 'node_modules'),
+    compilerNodeModules: path.join(uniCliPath, 'node_modules'),
     jest: path.join(testLibPath, 'node_modules/jest/bin/jest.js'),
     automatorEnv: path.join(uniCliPath, 'node_modules/@dcloudio/uni-automator/dist/environment.js'),
     automatorTeardown: path.join(uniCliPath, 'node_modules/@dcloudio/uni-automator/dist/teardown.js')
@@ -1201,6 +1216,26 @@ function resolveHBuilderXRuntime() {
   ensureUniAppTestDependency(runtime.automatorTeardown, '未找到 uni-automator teardown.js，请确认 uni-app 编译器插件安装完整。')
 
   return runtime
+}
+
+function getJestConfigSource(projectPath) {
+  const configFile = path.join(projectPath, 'jest.config.js')
+  return fs.existsSync(configFile) ? fs.readFileSync(configFile, 'utf8') : ''
+}
+
+function hasJestConfigOption(configSource, option) {
+  return new RegExp(`\\b${option}\\s*:`).test(configSource)
+}
+
+function getDefaultJestTransform(hbx) {
+  return {
+    '^.+\\.js$': [
+      require.resolve('babel-jest', { paths: [hbx.testLibPath] }),
+      {
+        plugins: [require.resolve('@babel/plugin-transform-modules-commonjs', { paths: [hbx.uniCliPath] })],
+      },
+    ],
+  }
 }
 
 function ensureUniAppTestDependency(file, message) {
