@@ -28,6 +28,11 @@ const require = createRequire(import.meta.url)
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const pkg = require('../package.json')
 
+function normalizeVersionName(versionName) {
+  if (versionName === undefined || versionName === null) return versionName
+  return String(versionName).split('@')[0]
+}
+
 const knownOpts = {
   version: Boolean,
   help: Boolean,
@@ -663,7 +668,7 @@ function loadManifest() {
   $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
   $G.manifest.uapp.versionName = $G.manifest.uapp[`${$G.projectType}.versionName`] || $G.manifest.versionName
   $G.manifest.uapp.versionCode = $G.manifest.uapp[`${$G.projectType}.versionCode`] || $G.manifest.versionCode
-  $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`]
+  $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
 
   // 缺失的参数，默认使用模版里的
   $G.manifest = _.merge(require(path.join($G.sdkHomeDir, '/templates/manifest.json')), $G.manifest)
@@ -717,6 +722,7 @@ function prepareCommand() {
 function updateAndroidMetaData() {
   let wxEntryActivityFile = 'WXEntryActivity.java'
   let wXPayEntryActivityFile = 'WXPayEntryActivity.java'
+  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
 
   let baseGradleFile = path.join($G.appDir, 'app/build.gradle')
   let content = fs.readFileSync(baseGradleFile, 'utf8')
@@ -725,7 +731,7 @@ function updateAndroidMetaData() {
   content = content.replace(/(applicationId\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.package + '$3')
   content = content.replace(/(app_name'\s*,\s*")(.*)(")/, '$1' + $G.manifest.uapp.name + '$3')
   content = content.replace(/(versionCode\s*(?:=\s*)?)(\d+)/, '$1' + $G.manifest.uapp.versionCode)
-  content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.versionName + '$3')
+  content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + versionName + '$3')
   content = content.replace(/("DCLOUD_APPKEY"\s*:\s*")(.*)(",)/, '$1' + $G.manifest.uapp.appkey + '$3')
 
   const isWxAppid = !!$G.manifest['app-plus'].distribute.sdkConfigs.oauth?.weixin?.appid
@@ -781,11 +787,17 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
 }
 
 function updateAndroidIcons(resDir) {
+  const iconFile = path.join(getIconResourceDir(resDir), '144x144.png')
   sync(
-    path.join(resDir, '144x144.png'),
+    iconFile,
     path.join($G.appDir, 'app/src/main/res/drawable-xxhdpi/icon.png')
   )
   console.log('✅ updateAndroidIcons')
+}
+
+function getIconResourceDir(resDir) {
+  const keepIcons = path.join($G.appDir, 'icons')
+  return fs.existsSync(keepIcons) && fs.statSync(keepIcons).isDirectory() ? keepIcons : resDir
 }
 
 /*
@@ -795,9 +807,10 @@ function updateAndroidIcons(resDir) {
 function updateIOSMetaData() {
   let baseYamlFile = path.join($G.appDir, 'config/base.yml')
   let content = fs.readFileSync(baseYamlFile, 'utf8')
+  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
 
   content = content.replace(/(PRODUCT_BUNDLE_IDENTIFIER: )(.*)/, '$1' + $G.manifest.uapp.package)
-  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionName)
+  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + versionName)
   content = content.replace(/(CURRENT_PROJECT_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionCode)
   fs.writeFileSync(baseYamlFile, content)
 
@@ -879,18 +892,19 @@ function replaceControlXml(xmlFile) {
 }
 
 function updateIOSIcons(resDir) {
-  let iconFiles = fs.readdirSync(resDir)
+  const iconResourceDir = getIconResourceDir(resDir)
+  let iconFiles = fs.readdirSync(iconResourceDir)
   iconFiles.forEach(function (file) {
     if (!file.endsWith('.png')) return
     // skip android icons
     if (['72x72.png', '96x96.png', '144x144.png', '192x192.png'].includes(file)) return
 
-    const fullPath = path.join(resDir, file)
+    const fullPath = path.join(iconResourceDir, file)
     sync(fullPath, path.join($G.appDir, '/Main/Resources/Images.xcassets/AppIcon.appiconset/', file), { delete: true })
   })
 
-  sync(path.join(resDir, '120x120.png'), path.join($G.appDir, 'Main/Resources/logo@2x.png'))
-  sync(path.join(resDir, '180x180.png'), path.join($G.appDir, 'Main/Resources/logo@3x.png'))
+  sync(path.join(iconResourceDir, '120x120.png'), path.join($G.appDir, 'Main/Resources/logo@2x.png'))
+  sync(path.join(iconResourceDir, '180x180.png'), path.join($G.appDir, 'Main/Resources/logo@3x.png'))
   console.log('✅ updateIOSIcons')
 }
 
@@ -1089,7 +1103,9 @@ function buildWebApp(buildArg) {
       }
 
       if (['build', 'app'].every(v => $G.args.argv.remain[1].includes(v)) && $G.args.release?.split('.').pop() === 'wgt') {
-        let wgtFile = path.join($G.webAppDir, 'unpackage/release/' + path.basename($G.args.release))
+        let releaseDir = path.join($G.webAppDir, 'unpackage/release')
+        fs.mkdirSync(releaseDir, { recursive: true })
+        let wgtFile = path.join(releaseDir, path.basename($G.args.release))
         zipDirectory(buildOutDir, wgtFile).then(() => {
           console.log('\n打包成功, wgt 文件路径: ')
           console.log(wgtFile)
