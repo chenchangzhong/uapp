@@ -7,7 +7,7 @@ uapp 通用命令🔥
   - 新建工程
     uapp new demo1    # 使用 uapp-webapp 模版新建工程
     uapp add android  # 当前目录下创建 android 工程
-    uapp add ios      # 当前目录下创建 ios 工程
+    uapp add ios      # 当前目录下创建 ios 工程 (优先用内置模板, uapp sdk init 后生效)
 
   - webapp 工程下编译命令
     uapp run dev:h5
@@ -35,10 +35,11 @@ uapp 通用命令🔥
     uapp run build:app-plus apk           # 注意：vue2 要用 :app-plus
 
   - iOS 工程下命令
-    uapp run build:app dev                # 编译自定义基座
-    uapp run build:app apk                # 编译测试包
-    uapp run build:app devApp             # 编译 iOS 模拟器包
-    uapp run build:app apk upload         # 编译测试包并上传蒲公英
+    uapp run build:app base               # 编译真机自定义基座
+    uapp run build:app test               # 编译测试包
+    uapp run build:app sim                # 编译 iOS 模拟器包
+    uapp run build:app test upload        # 编译测试包并上传蒲公英
+    uapp run build:app release            # 编译 release 发布包 (需 config/export_release.plist)
 
   - 配置 HBuilderX 和 微信安装环境
     uapp config hbx.dir "C:\Program Files (x86)\HBuilderX"

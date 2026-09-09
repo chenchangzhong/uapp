@@ -1,0 +1,24 @@
+targets:
+    uapp-test:
+        scheme: {}
+        templates:
+            - uAppBase
+        entitlements:
+            path: uapp-test.entitlements
+            properties:
+                aps-environment: development
+                com.apple.developer.applesignin:
+                    - Default
+        settings:
+            CODE_SIGN_IDENTITY: Apple Development
+            DEVELOPMENT_TEAM: 'YOUR_DEVELOPMENT_TEAM'
+            # 按项目实际开发签名修改: 填 profile 的 Name
+            PROVISIONING_PROFILE_SPECIFIER: uapp-dev
+            PRODUCT_BUNDLE_IDENTIFIER: com.example.uapp
+            INFOPLIST_FILE: '$(SRCROOT)/Main/Resources/AppRelease/Info.plist'
+        sources:
+            - path: Main/Resources
+              type: Bundles
+              includes:
+                  - AppRelease/control.xml
+              buildPhase: resources

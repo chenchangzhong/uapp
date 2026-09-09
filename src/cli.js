@@ -250,6 +250,38 @@ export default function (inputArgs) {
       return
     }
 
+    // 优先使用本地模板 (uapp sdk init 会把内置模板同步到 ~/.uappsdk/templates/)
+    const localTemplate = path.join($G.sdkHomeDir, 'templates', platform)
+    if (platform === 'ios' && fs.existsSync(localTemplate)) {
+      const dest = path.join(process.cwd(), platform)
+      if (fs.existsSync(dest)) {
+        console.log(chalk.red('目录已存在: ' + dest))
+        return
+      }
+      sync(localTemplate, dest, { delete: false })
+
+      // manifest.json 必须是软链指向根 manifest.json (模板复制不会带软链)
+      const manifestLink = path.join(dest, 'manifest.json')
+      if (!fs.existsSync(manifestLink) || !fs.lstatSync(manifestLink).isSymbolicLink()) {
+        fs.rmSync(manifestLink, { force: true })
+        fs.symlinkSync('../manifest.json', manifestLink)
+      }
+
+      // SDK 软链 (指向本机 ~/.uappsdk/ios/SDK)
+      const sdkLinkDir = path.join(dest, 'SDKs', 'SDK')
+      if (!fs.existsSync(sdkLinkDir) && fs.existsSync(path.join($G.sdkHomeDir, 'ios/SDK'))) {
+        fs.symlinkSync(path.join($G.sdkHomeDir, 'ios/SDK'), sdkLinkDir, 'dir')
+      }
+
+      console.log(chalk.green('--- iOS 工程已创建 (本地模板) ---'))
+      console.log('下一步:')
+      console.log('1. 根 manifest.json 的 uapp 节点填 ios.package / ios.appkey')
+      console.log('2. 按签名信息修改 ios/config/*.yml 的 PROVISIONING_PROFILE_SPECIFIER 和 export_*.plist (占位符见 ios/README.md)')
+      console.log('3. cd ios && xcodegen generate')
+      console.log('4. 打包: uapp run build:app-plus base|test|sim|release')
+      return
+    }
+
     return clone(`https://gitee.com/uappkit/platform.git/${platform}#main`, platform)
   }
 
@@ -514,7 +546,7 @@ export default function (inputArgs) {
           return
         }
         const name = fs.readFileSync(path.join($G.appDir, '/project.yml'), 'utf8').match(/^name:\s*(\S+)/m)[1]
-        if (buildType === 'apk') {
+        if (buildType === 'test') {
           // gererate uapp_test.xcarchive
           execSync(
             `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "${name}-test" -archivePath out/${name}_test.xcarchive archive`,
@@ -539,7 +571,7 @@ export default function (inputArgs) {
             console.log('开始上传到蒲公英平台...')
             uploadFile(newFilePath)
           }
-        } else if (buildType === 'dev') {
+        } else if (buildType === 'base') {
           // gererate uapp_debug.xcarchive
           execSync(
             `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "HBuilder" -archivePath out/${name}_debug.xcarchive archive`,
@@ -559,7 +591,7 @@ export default function (inputArgs) {
               { delete: true }
             )
           }
-        } else if (buildType === 'devApp') {
+        } else if (buildType === 'sim') {
           execSync(
             `arch -x86_64 xcodebuild \
             -project ${name}.xcodeproj \
@@ -579,12 +611,43 @@ export default function (inputArgs) {
               { delete: true }
             )
           }
+        } else if (buildType === 'release') {
+          const exportOptionsPlist = path.join($G.appDir, 'config/export_release.plist')
+          if (!fs.existsSync(exportOptionsPlist)) {
+            console.log(
+              chalk.red('缺少 config/export_release.plist，请按项目签名信息创建 (method: app-store-connect 或 ad-hoc)')
+            )
+            console.log('👉 https://gitee.com/uappkit/platform/blob/main/ios/README.md')
+            return
+          }
+
+          // gererate uapp_release.xcarchive
+          execSync(
+            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "${name}-release" -archivePath out/${name}_release.xcarchive archive`,
+            { stdio: 'inherit' }
+          )
+
+          // generate ipa
+          execSync(
+            `xcodebuild -exportArchive -archivePath out/${name}_release.xcarchive -exportPath out -exportOptionsPlist config/export_release.plist`,
+            { stdio: 'inherit' }
+          )
+
+          // 重命名 IPA 文件
+          const originalFilePath = path.join($G.appDir, `out/${name}-release.ipa`)
+          const newFilePath = path.join(
+            $G.appDir,
+            `out/app-${$G.manifest.uapp.versionName}-release.ipa`
+          )
+          execSync(`mv ${originalFilePath} ${newFilePath}`, { stdio: 'inherit' })
         } else {
           console.log(chalk.red(`无效的 iOS 构建类型: ${buildType}`))
-          console.log('示例: dev, apk, devApp')
+          console.log('示例: base, test, sim, release')
           return
         }
-        console.log(chalk.yellow('iOS 仅支持自定义基座和测试打包，正式发版请直接使用 xcode'))
+        console.log(
+          chalk.yellow('iOS: base=真机自定义基座, test=测试包, sim=模拟器包, release=正式包 (需 config/export_release.plist)')
+        )
       }
     })()
   }
@@ -677,7 +740,7 @@ function loadManifest() {
 function prepareCommand() {
   let compiledDir = getBuildOut()
   const buildType = $G.args.argv.remain[2] || ''
-  if (!buildType.includes('dev') && !pathExistsSync(compiledDir)) {
+  if (!buildType.includes('dev') && !['base', 'sim'].includes(buildType) && !pathExistsSync(compiledDir)) {
     console.log(chalk.red('找不到本地App打包资源'))
     console.log('请使用 HBuilderX => 发行(菜单) => 原生App本地打包 => 生成本地打包App资源')
     process.exit()
@@ -706,7 +769,7 @@ function prepareCommand() {
     $G.appDir,
     $G.projectType === 'ios' ? 'Main/Pandora/apps' : 'app/src/main/assets/apps'
   )
-  if (buildType.includes('dev')) {
+  if (buildType.includes('dev') || ['base', 'sim'].includes(buildType)) {
     removeSync(path.join(embedAppsDir, $G.manifest.appid))
   } else {
     emptyDirSync(embedAppsDir)
@@ -838,6 +901,8 @@ function updateIOSMetaData() {
 }
 
 function replaceStoryboard(storyboardFile) {
+  // 项目可能没有 LaunchScreenAD.storyboard (未启用开屏广告), 跳过
+  if (!fs.existsSync(storyboardFile)) return
   let content = fs.readFileSync(storyboardFile, 'utf8')
   const re = /(text=")(.+?)(".+)(?=uapp-launchscreen-appname)/
   content = content.replace(re, '$1' + $G.manifest.uapp.name + '$3')

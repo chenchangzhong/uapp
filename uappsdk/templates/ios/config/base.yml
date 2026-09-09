@@ -1,0 +1,199 @@
+targetTemplates:
+    uAppBase:
+        type: application
+        platform: iOS
+        deploymentTarget: '15.0'
+        entitlements: uapp.entitlements
+        # 启用 Sign in with Apple 和 push capability
+        attributes:
+            SystemCapabilities:
+                com.apple.AppleIDSignIn: 1
+                com.apple.Push: 1
+
+        settings:
+            CODE_SIGN_STYLE: Manual
+            MARKETING_VERSION: 1.0.0
+            CURRENT_PROJECT_VERSION: 100
+            DISPLAY_NAME: uapp
+            # 手动签名统一在这里; CODE_SIGN_IDENTITY/DEVELOPMENT_TEAM/
+            # PROVISIONING_PROFILE_SPECIFIER/PRODUCT_BUNDLE_IDENTIFIER
+            # 分环境配置在 uapp_dev.yml / uapp_test.yml / uapp_release.yml
+            # TARGETED_DEVICE_FAMILY: iPhone=1, iPad=2, All=1,2
+            TARGETED_DEVICE_FAMILY: 1,2
+            ARCHS[sdk=iphoneos*]: '$(ARCHS_STANDARD)'
+            ARCHS[sdk=iphonesimulator*]: x86_64
+            VALID_ARCHS: "x86_64 arm64"
+            DEVELOPMENT_LANGUAGE: zh-Hant-HK
+            FRAMEWORK_SEARCH_PATHS:
+                - '$(inherited)'
+                - '$(DEVELOPER_FRAMEWORKS_DIR)'
+            LD_RUNPATH_SEARCH_PATHS:
+                - '$(inherited)'
+                - '@executable_path/Frameworks'
+            LIBRARY_SEARCH_PATHS:
+                - '$(PROJECT_DIR)'
+                - '$(SRCROOT)/SDKs/SDK/Libs'
+            OTHER_LDFLAGS: '-ObjC'
+            ENABLE_BITCODE: 'NO'
+            VALIDATE_WORKSPACE: 'YES'
+            HEADER_SEARCH_PATHS:
+                - '$(inherited)'
+                - '$(SRCROOT)/SDKs/SDK/inc/**'
+            GCC_PRECOMPILE_PREFIX_HEADER: 'YES'
+            GCC_PREFIX_HEADER: Main/App-Prefix.pch
+            GCC_PREPROCESSOR_DEFINITIONS: 'PDR_PLUS_MAP PDR_PLUS_GETUI PDR_PLUS_UMEN'
+
+        sources:
+            - path: Main
+              excludes:
+                  - Pandora
+              buildPhase: none
+
+            - path: Main
+              includes:
+                  - main.m
+                  - AppDelegate.m
+                  - ViewController.m
+              buildPhase: sources
+
+            - path: Main/Dcloud.swift
+
+            - path: Main/Resources
+              type: Bundles
+              includes:
+                  - en.lproj/InfoPlist.strings
+                  - zh-Hans.lproj/InfoPlist.strings
+                  - LaunchScreen.storyboard
+                  - Images.xcassets
+              buildPhase: resources
+
+            - path: Main/Pandora
+              type: folder
+              buildPhase: resources
+
+            - path: SDKs/SDK/Bundles/__uniappes6.js
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/weex-polyfill.js
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/weexUniJs.js
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/uni-jsframework.js
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/unincomponents.ttf
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/PandoraApi.bundle
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/DCSVProgressHUD.bundle
+              group: Main/Bundles
+            - path: SDKs/SDK/Bundles/DCPGVideo.bundle
+              group: Main/Bundles
+
+        dependencies:
+            # 基础模块-start
+            - sdk: JavaScriptCore.framework
+            - sdk: WebKit.framework
+            - sdk: CoreTelephony.framework
+            - sdk: MobileCoreServices.framework
+            - sdk: SystemConfiguration.framework
+            - sdk: MediaPlayer.framework
+            - sdk: AudioToolbox.framework
+            - sdk: Security.framework
+            - sdk: QuartzCore.framework
+            - sdk: CFNetwork.framework
+            - sdk: Foundation.framework
+            - sdk: CoreFoundation.framework
+            - sdk: CoreGraphics.framework
+            - sdk: UIKit.framework
+            - sdk: QuickLook.framework
+            - sdk: libc++.tbd
+            - sdk: libxml2.tbd
+            - sdk: libz.tbd
+            - sdk: libsqlite3.0.tbd
+            - sdk: ImageIO.framework
+            - sdk: CoreText.framework
+            - sdk: libicucore.tbd
+            # 基础模块-end
+            - sdk: CoreMotion.framework # 定位
+            # video-start
+            - sdk: libbz2.tbd
+            - sdk: OpenGLES.framework
+            - sdk: CoreMedia.framework
+            - sdk: CoreVideo.framework
+            - sdk: VideoToolbox.framework
+            # video-end
+            - sdk: Accelerate.framework # 加速度传感器
+            # uniPush-start
+            - sdk: libresolv.tbd
+            - sdk: CoreLocation.framework
+            - sdk: AVFoundation.framework
+            - sdk: UserNotifications.framework
+              weak: true
+            # uniPush-end
+            # 基础模块-start
+            - framework: SDKs/SDK/Libs/DCUniBase.framework
+              embed: true
+              codeSign: true
+            - framework: SDKs/SDK/Libs/DCloudUTSFoundation.framework
+              embed: true
+              codeSign: true
+            - framework: SDKs/SDK/Libs/DCloudUTSExtAPI.framework
+              embed: true
+              codeSign: true
+            - framework: SDKs/SDK/Libs/liblibPGInvocation.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibNativeObj.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibNativeUI.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibNavigator.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibUI.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibStorage.a
+              embed: false
+            # 基础模块-end
+            - framework: SDKs/SDK/Libs/liblibIO.a # 文件系统
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibOrientation.a # 设备方向
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibXHR.a # 网络请求
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibZip.a # Zip
+              embed: false
+            # uniPush-start
+            - framework: SDKs/SDK/Libs/liblibPush.a
+              embed: false
+            - framework: SDKs/SDK/Libs/libUniPush.a
+              embed: false
+            - framework: SDKs/SDK/Libs/GTSDK.xcframework
+              embed: false
+            # uniPush-end
+            # audio模块-start
+            - framework: SDKs/SDK/Libs/liblibMedia.a
+              embed: false
+            - framework: SDKs/SDK/Libs/libopencore-amrnb.a
+              embed: false
+            - framework: SDKs/SDK/Libs/libmp3lame.a
+              embed: false
+            - framework: SDKs/SDK/Libs/DCUniRecord.framework
+              embed: false
+            # audio模块-end
+            # video模块-start
+            - framework: SDKs/SDK/Libs/libDCUniVideo.a
+              embed: false
+            - framework: SDKs/SDK/Libs/liblibVideo.a
+              embed: false
+            - framework: SDKs/SDK/Libs/DCUniVideoPublic.framework
+              embed: false
+            - framework: SDKs/SDK/Libs/IJKMediaFrameworkWithSSL.framework
+              embed: false
+            - framework: SDKs/SDK/Libs/Masonry.framework
+              embed: false
+            # video模块-end
+            - framework: SDKs/SDK/Libs/liblibAdSupport.a
+              embed: false
+
+        preBuildScripts:
+            - path: Main/prebuild-script.sh
+        postBuildScripts:
+            - path: Main/postbuild-script.sh

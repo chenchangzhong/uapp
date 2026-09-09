@@ -1,0 +1,7 @@
+# 构建产物
+out/
+# Xcode 用户数据
+xcuserdata/
+.DS_Store
+# DCloud 离线 SDK 软链 (uapp add / prepare 会自动创建, 指向 ~/.uappsdk/ios/SDK)
+SDKs/SDK

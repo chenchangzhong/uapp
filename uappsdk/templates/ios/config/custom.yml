@@ -1,0 +1,8 @@
+# 项目自定义配置 (可留空)
+# 示例: 引入子工程 (framework + implicit: true 规避 XcodeGen 多 target 丢引用 bug)
+# projectReferences:
+#   IJKMediaPlayer:
+#     path: SDKs/ijkplayer/ios/IJKMediaPlayer/IJKMediaPlayer.xcodeproj
+
+targetTemplates:
+    uAppBase: {}

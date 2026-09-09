@@ -270,17 +270,20 @@ uapp run build:app apk:huawei upload
 ### iOS 构建类型
 
 ```bash
-# 编译自定义基座 (默认)
-uapp run build:app dev
+# 编译真机自定义基座
+uapp run build:app base
 
 # 编译测试包 (使用 export_test.plist)
-uapp run build:app apk
+uapp run build:app test
 
 # 编译 iOS 模拟器包 (x86_64, iPhone 17 Simulator)
-uapp run build:app devApp
+uapp run build:app sim
 
 # 编译测试包并上传蒲公英
-uapp run build:app apk upload
+uapp run build:app test upload
+
+# 编译 release 发布包 (使用 export_release.plist, 需自行创建并按项目签名配置)
+uapp run build:app release
 ```
 
 ## 四、manifest.json 相关配置

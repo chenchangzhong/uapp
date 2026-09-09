@@ -1,0 +1,13 @@
+name: uapp
+
+include:
+  - path: config/base.yml
+    relativePaths: false
+  - path: config/uapp_dev.yml
+    relativePaths: false
+  - path: config/uapp_test.yml
+    relativePaths: false
+  - path: config/uapp_release.yml
+    relativePaths: false
+  - path: config/custom.yml
+    relativePaths: false

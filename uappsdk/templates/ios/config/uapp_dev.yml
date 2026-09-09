@@ -1,0 +1,30 @@
+targets:
+    HBuilder:
+        scheme: {}
+        templates:
+            - uAppBase
+        entitlements:
+            path: HBuilder.entitlements
+            properties:
+                aps-environment: development
+                com.apple.developer.applesignin:
+                    - Default
+        settings:
+            CODE_SIGN_IDENTITY: Apple Development
+            DEVELOPMENT_TEAM: 'YOUR_DEVELOPMENT_TEAM'
+            # 按项目实际开发签名修改: 填 profile 的 Name (苹果后台/钥匙串里的名字)
+            PROVISIONING_PROFILE_SPECIFIER: uapp-dev
+            PRODUCT_BUNDLE_IDENTIFIER: com.example.uapp
+            INFOPLIST_FILE: '$(SRCROOT)/Main/Resources/AppDev/Info.plist'
+        sources:
+            - path: Main/Resources/AppDev/HXDependencies
+              type: folder
+              buildPhase: resources
+            - path: Main/Resources
+              type: Bundles
+              includes:
+                  - AppDev/control.xml
+              buildPhase: resources
+        dependencies:
+            - framework: SDKs/SDK/Libs/liblibLog.a
+              embed: false

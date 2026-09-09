@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- 分发方式: app-store-connect | ad-hoc | enterprise, 按实际修改 -->
+	<key>method</key>
+	<string>app-store-connect</string>
+	<!-- 开发者团队 ID -->
+	<key>teamID</key>
+	<string>YOUR_DEVELOPMENT_TEAM</string>
+	<key>signingStyle</key>
+	<string>manual</string>
+	<key>signingCertificate</key>
+	<string>Apple Distribution</string>
+	<key>provisioningProfiles</key>
+	<dict>
+		<!-- key = PRODUCT_BUNDLE_IDENTIFIER, value = profile 的 Name -->
+		<key>com.example.uapp</key>
+		<string>uapp-release</string>
+	</dict>
+	<key>stripSwiftSymbols</key>
+	<true/>
+	<key>compileBitcode</key>
+	<false/>
+	<key>thinning</key>
+	<string>&lt;none&gt;</string>
+</dict>
+</plist>
