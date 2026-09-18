@@ -732,9 +732,6 @@ function loadManifest() {
   $G.manifest.uapp.versionName = $G.manifest.uapp[`${$G.projectType}.versionName`] || $G.manifest.versionName
   $G.manifest.uapp.versionCode = $G.manifest.uapp[`${$G.projectType}.versionCode`] || $G.manifest.versionCode
   $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
-
-  // 缺失的参数，默认使用模版里的
-  $G.manifest = _.merge(require(path.join($G.sdkHomeDir, '/templates/manifest.json')), $G.manifest)
 }
 
 function prepareCommand() {
@@ -1164,7 +1161,6 @@ function buildWebApp(buildArg) {
     p.on('close', code => {
       if (code !== 0 || errOut.indexOf('failed with errors') > -1 || errOut.indexOf('Missing platform') > -1) {
         process.exit(-1)
-        return reject()
       }
 
       if (['build', 'app'].every(v => $G.args.argv.remain[1].includes(v)) && $G.args.release?.split('.').pop() === 'wgt') {
