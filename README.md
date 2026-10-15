@@ -419,6 +419,26 @@ tauri是基于`rust`开发，可以通过`rust`生态来扩展，`v2`还处在al
 
 见 [doc/help.txt](doc/help.txt)
 
+### 全局配置
+
+```bash
+uapp config set hbx.dir "/Applications/HBuilderX.app"
+uapp config get hbx.dir
+uapp config list
+uapp config delete hbx.dir
+```
+
+配置保存到 `~/.uappsdk/config.json`，无需先执行 `uapp sdk init`。`get` 只输出已保存的值，未配置时返回非零退出码；`list`（或直接 `uapp config`）以 JSON 输出已保存配置。删除不存在的配置不报错。
+
+| 配置项 | 值的要求 |
+|:------|:--------|
+| `hbx.dir`、`wx.dir` | 已存在的安装目录 |
+| `node` | 已存在的程序文件 |
+
+路径支持相对路径和 `~/`，保存时转为绝对路径，含空格的路径需加引号。未知配置项、缺少或多余参数、非法值会报错，且不会修改配置文件。
+
+查询不包含运行时自动探测的默认路径；`delete` 仅移除显式配置，后续运行仍会使用已有的默认探测逻辑。旧写法 `uapp config <key> <value>` 继续支持；**`uapp config <key>` 现在查询，不再删除**，删除请明确使用 `delete`。
+
 ## License
 
 The Apache License 2. Please see [License File](LICENSE.md) for more information.
