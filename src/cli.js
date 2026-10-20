@@ -495,8 +495,7 @@ export default function (inputArgs) {
           const channel = buildType.split(':')[1] || 'origin'
           const outFileMap = {
             apk: `apk/${channel}/release/`,
-            dev: `apk/${channel}/debug/`,
-            aab: 'bundle/release/'
+            dev: `apk/${channel}/debug/`
           }
           const suffix = buildType === 'aab' ? 'aab' : 'apk'
           const papkFileName = `app-${channel}-${$G.manifest.uapp.versionName}-${
@@ -506,12 +505,22 @@ export default function (inputArgs) {
             stdio: 'inherit'
           })
 
-          const outFileMapValue = outFileMap[buildType.split(':')[0]]
-          const buildOutFile = path.join(
-            $G.appDir,
-            'app/build/outputs/',
-            `${outFileMapValue}${papkFileName}`
-          )
+          // aab 的目录和文件名由 AGP 固定为 bundle/<flavor><BuildType>/<project>-<flavor>-<buildType>.aab,
+          // -PapkFileName 只对 apk 输出生效, 所以 aab 按实际产物查找
+          let buildOutFile = null
+          if (buildType === 'aab') {
+            // 找不到时回落到目录本身, 由 checkBuildArtifact 报错并指出查找位置
+            buildOutFile =
+              findBundleArtifact(channel) ||
+              path.join($G.appDir, 'app/build/outputs/bundle', `${channel}Release`)
+          } else {
+            const outFileMapValue = outFileMap[buildType.split(':')[0]]
+            buildOutFile = path.join(
+              $G.appDir,
+              'app/build/outputs/',
+              `${outFileMapValue}${papkFileName}`
+            )
+          }
           checkBuildArtifact(buildOutFile)
 
           if (isDev && args.copy) {
@@ -736,6 +745,24 @@ function checkBuildArtifact(file) {
   if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
     throw new Error('未找到构建产物文件: ' + file)
   }
+}
+
+// aab 由 bundleRelease 产出到 app/build/outputs/bundle/<flavor><BuildType>/ 下,
+// 文件名由 AGP 用 project 名和 variant 名拼出, 不受 -PapkFileName 控制
+function findBundleArtifact(channel) {
+  const bundleDir = path.join($G.appDir, 'app/build/outputs/bundle', `${channel}Release`)
+  if (!fs.existsSync(bundleDir)) {
+    return null
+  }
+  const aabFiles = fs
+    .readdirSync(bundleDir)
+    .filter((name) => name.endsWith('.aab'))
+    .map((name) => {
+      const file = path.join(bundleDir, name)
+      return { file, mtime: fs.statSync(file).mtimeMs }
+    })
+    .sort((a, b) => b.mtime - a.mtime)
+  return aabFiles.length ? aabFiles[0].file : null
 }
 
 function prepareCommand() {
