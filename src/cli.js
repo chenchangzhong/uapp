@@ -509,10 +509,11 @@ export default function (inputArgs) {
           // -PapkFileName 只对 apk 输出生效, 所以 aab 按实际产物查找
           let buildOutFile = null
           if (buildType === 'aab') {
-            // 找不到时回落到目录本身, 由 checkBuildArtifact 报错并指出查找位置
-            buildOutFile =
-              findBundleArtifact(channel) ||
-              path.join($G.appDir, 'app/build/outputs/bundle', `${channel}Release`)
+            const aabFile = findBundleArtifact(channel)
+            // 命中则统一命名, 找不到时回落到目录本身, 由 checkBuildArtifact 报错并指出查找位置
+            buildOutFile = aabFile
+              ? renameBundleArtifact(aabFile, channel)
+              : path.join($G.appDir, 'app/build/outputs/bundle', `${channel}Release`)
           } else {
             const outFileMapValue = outFileMap[buildType.split(':')[0]]
             buildOutFile = path.join(
@@ -763,6 +764,20 @@ function findBundleArtifact(channel) {
     })
     .sort((a, b) => b.mtime - a.mtime)
   return aabFiles.length ? aabFiles[0].file : null
+}
+
+// 统一 aab 命名为 app-<channel>-<version>-release.aab, 与 apk 保持一致
+function renameBundleArtifact(file, channel) {
+  const target = path.join(
+    path.dirname(file),
+    `app-${channel}-${$G.manifest.uapp.versionName}-release.aab`
+  )
+  if (target === file) {
+    return target
+  }
+  fs.rmSync(target, { force: true })
+  fs.renameSync(file, target)
+  return target
 }
 
 function prepareCommand() {
