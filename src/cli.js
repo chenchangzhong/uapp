@@ -1011,8 +1011,9 @@ function updateIOSIcons(resDir) {
     sync(fullPath, path.join($G.appDir, '/Main/Resources/Images.xcassets/AppIcon.appiconset/', file), { delete: true })
   })
 
-  sync(path.join(iconResourceDir, '120x120.png'), path.join($G.appDir, 'Main/Resources/logo@2x.png'))
-  sync(path.join(iconResourceDir, '180x180.png'), path.join($G.appDir, 'Main/Resources/logo@3x.png'))
+  // 不再生成 Main/Resources/logo@2x|3x.png：现行模板走 asset catalog
+  // （CFBundleIconName=AppIcon），这两个文件既不在 Resources 构建白名单里、
+  // 也不被 Info.plist 引用，属于 4d682cd 遗留的空产物，只会污染工作区。
   console.log('✅ updateIOSIcons')
 }
 
