@@ -923,11 +923,19 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
 }
 
 function updateAndroidIcons(resDir) {
-  const iconFile = path.join(getIconResourceDir(resDir), '144x144.png')
-  sync(
-    iconFile,
-    path.join($G.appDir, 'app/src/main/res/drawable-xxhdpi/icon.png')
-  )
+  const iconResourceDir = getIconResourceDir(resDir)
+  // 72/96/144/192 分别对应 Android 四档密度，与 iOS 侧的跳过清单保持一致
+  const densityIconMap = {
+    hdpi: '72x72.png',
+    xhdpi: '96x96.png',
+    xxhdpi: '144x144.png',
+    xxxhdpi: '192x192.png'
+  }
+  Object.keys(densityIconMap).forEach(function (density) {
+    const iconFile = path.join(iconResourceDir, densityIconMap[density])
+    if (!fs.existsSync(iconFile)) return
+    sync(iconFile, path.join($G.appDir, `app/src/main/res/drawable-${density}/icon.png`))
+  })
   console.log('✅ updateAndroidIcons')
 }
 
