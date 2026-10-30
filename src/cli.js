@@ -501,12 +501,12 @@ export default function (inputArgs) {
           const papkFileName = `app-${channel}-${$G.manifest.uapp.versionName}-${
             isDev ? 'debug' : 'release'
           }.${suffix}`
-          execSync(`${gradle} ${assembleTypeMap[buildType]} -PapkFileName=${papkFileName} -s`, {
+          execSync(`${gradle} ${assembleTypeMap[buildType]} -s`, {
             stdio: 'inherit'
           })
 
-          // aab 的目录和文件名由 AGP 固定为 bundle/<flavor><BuildType>/<project>-<flavor>-<buildType>.aab,
-          // -PapkFileName 只对 apk 输出生效, 所以 aab 按实际产物查找
+          // aab/apk 的目录与文件名都由 AGP 按 project/flavor/buildType 生成,
+          // 各 AGP 版本命名不完全一致, 故按实际产物查找后统一重命名
           let buildOutFile = null
           if (buildType === 'aab') {
             const aabFile = findBundleArtifact(channel)
@@ -516,11 +516,10 @@ export default function (inputArgs) {
               : path.join($G.appDir, 'app/build/outputs/bundle', `${channel}Release`)
           } else {
             const outFileMapValue = outFileMap[buildType.split(':')[0]]
-            buildOutFile = path.join(
-              $G.appDir,
-              'app/build/outputs/',
-              `${outFileMapValue}${papkFileName}`
-            )
+            const apkFile = findApkArtifact(channel, isDev)
+            buildOutFile = apkFile
+              ? renameApkArtifact(apkFile, channel, isDev)
+              : path.join($G.appDir, 'app/build/outputs/', `${outFileMapValue}${papkFileName}`)
           }
           checkBuildArtifact(buildOutFile)
 
@@ -771,6 +770,37 @@ function renameBundleArtifact(file, channel) {
   const target = path.join(
     path.dirname(file),
     `app-${channel}-${$G.manifest.uapp.versionName}-release.aab`
+  )
+  if (target === file) {
+    return target
+  }
+  fs.rmSync(target, { force: true })
+  fs.renameSync(file, target)
+  return target
+}
+
+// apk 由 AGP 按 project/flavor/buildType 命名(如 app-origin-release.apk),
+// 各 AGP 版本命名不完全一致, 按目录扫描取实际产物
+function findApkArtifact(channel, isDev) {
+  const apkDir = path.join($G.appDir, 'app/build/outputs/apk', channel, isDev ? 'debug' : 'release')
+  if (!fs.existsSync(apkDir)) {
+    return null
+  }
+  const apkFiles = fs
+    .readdirSync(apkDir)
+    .filter((name) => name.endsWith('.apk'))
+    .sort()
+  if (!apkFiles.length) {
+    return null
+  }
+  return path.join(apkDir, apkFiles[apkFiles.length - 1])
+}
+
+// 统一 apk 命名为 app-<channel>-<version>-<debug|release>.apk
+function renameApkArtifact(file, channel, isDev) {
+  const target = path.join(
+    path.dirname(file),
+    `app-${channel}-${$G.manifest.uapp.versionName}-${isDev ? 'debug' : 'release'}.apk`
   )
   if (target === file) {
     return target
