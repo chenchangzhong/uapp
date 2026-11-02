@@ -1373,7 +1373,8 @@ function updateIOSUrlSchemes(plistFile) {
   console.log(`✅ updateIOSUrlSchemes (scheme: ${urltypes.length}, queries: ${urlSchemeWhitelist.length}, google: ${googleClientId ? 'yes' : 'no'})`)
 }
 
-// manifest 根节点的 locale / fallbackLocale + locale/*.json 决定 iOS 的本地化列表。
+// manifest 根节点的 locale / fallbackLocale 决定 iOS 的本地化列表, 只认 manifest,
+// 不扫描 locale/ 目录 (目录里残留的语种文件会让 App Store 语言列表与 manifest 不一致)。
 // 不写 CFBundleLocalizations 时 iOS 只认 CFBundleDevelopmentRegion, uni.getSystemInfo 的
 // language 永远是开发语言, 应用内多语言不会跟随系统.
 function getIOSLocalizationLanguages() {
@@ -1385,16 +1386,6 @@ function getIOSLocalizationLanguages() {
 
   push($G.manifest.locale)
   push($G.manifest.fallbackLocale)
-
-  const dir = path.join($G.webAppDir, 'locale')
-  if (fs.existsSync(dir)) {
-    fs.readdirSync(dir)
-      .filter((file) => file.endsWith('.json'))
-      .map((file) => file.replace(/^uni-app\./, '').replace(/\.json$/, ''))
-      .filter((name) => /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(name))
-      .sort()
-      .forEach(push)
-  }
 
   return languages
 }
@@ -1634,6 +1625,19 @@ function getIOSPluginParameterDefinitions(ios, parameters) {
   return definitions
 }
 
+// 参数值解析: 优先用 manifest 里填的值, 没填则用定义里的 value 模板 (可含 ${参数名} 占位)
+function resolveIOSPluginParameterValue(definitions, name, parameters) {
+  const definition = definitions[name] || {}
+  const template = definition.value === undefined || definition.value === null ? '' : String(definition.value)
+  const rawValue = parameters[name]
+  const hasRawValue = rawValue !== undefined && rawValue !== null && rawValue !== ''
+  const token = '${' + name + '}'
+
+  if (template.includes(token)) return template.split(token).join(hasRawValue ? String(rawValue) : '')
+  // 没模板时保留原始类型 (boolean/number 由 plistValueXml 写成 <true/> / <integer>)
+  return hasRawValue ? rawValue : template
+}
+
 function getIOSNativePluginPlistEntries(plugins) {
   const entries = []
   plugins.forEach(({ ios, parameters }) => {
@@ -1646,15 +1650,9 @@ function getIOSNativePluginPlistEntries(plugins) {
       const definition = definitions[name] || {}
       if (!definition.key) return
 
-      const template = definition.value === undefined || definition.value === null ? '' : String(definition.value)
-      const rawValue = parameters[name]
-      const hasRawValue = rawValue !== undefined && rawValue !== null && rawValue !== ''
-      // 插件声明的参数键必须出现在 Info.plist 里, 值为空也写入空字符串
-      const formatted = template.includes(`\${${name}}`)
-        ? template.split(`\${${name}}`).join(hasRawValue ? String(rawValue) : '')
-        : hasRawValue
-          ? rawValue
-          : template
+      const formatted = resolveIOSPluginParameterValue(definitions, name, parameters)
+      // 参数没填时不写占位键, 避免把空字符串塞进 Info.plist (由 warnEmptyIOSPluginParameters 提示)
+      if (!String(formatted).trim()) return
 
       entries.push([definition.key.split(':'), formatted])
     })
@@ -1779,13 +1777,13 @@ function warnEmptyIOSPluginParameters(plugins) {
   plugins.forEach(({ id, ios, parameters }) => {
     const definitions = getIOSPluginParameterDefinitions(ios, parameters)
     Object.keys(definitions).forEach((name) => {
-      if (!definitions[name]?.key) return
-      const rawValue = parameters[name]
-      if (rawValue === undefined || rawValue === null || rawValue === '') empty.push(`${id}.${name}`)
+      if (definitions[name]?.key && !String(resolveIOSPluginParameterValue(definitions, name, parameters)).trim()) {
+        empty.push(`${id}.${name}`)
+      }
     })
   })
   if (empty.length) {
-    console.log(chalk.yellow(`原生插件参数为空，Info.plist 里会写成空字符串（插件等同未生效）：${empty.join(', ')}`))
+    console.log(chalk.yellow(`原生插件参数为空，已跳过写入 Info.plist（插件可能不会生效）：${empty.join(', ')}`))
   }
 }
 

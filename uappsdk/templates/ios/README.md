@@ -56,7 +56,7 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
   `CFBundleURLName=scheme` 的 schemes、`ios.urlschemewhitelist` →
   `LSApplicationQueriesSchemes`、`sdkConfigs.oauth.google.clientid` → `GIDClientID`（原值）
   + `google_url`（倒序）；没配置时保留模板原值，模板缺键会自动补齐
-- 多语言：manifest 根节点 `locale` / `fallbackLocale` + `locale/*.json` 汇总写入 `CFBundleLocalizations`，
+- 多语言：manifest 根节点 `locale` / `fallbackLocale` 写入 `CFBundleLocalizations`（只认 manifest，不扫描 `locale/` 目录），
   否则 iOS 只认 `CFBundleDevelopmentRegion`，应用内语言不跟随系统；`CFBundleDevelopmentRegion`
   跟随 `fallbackLocale`（兜底语言必须是支持列表里的一种）
 - 屏幕方向：`app-plus.screenOrientation` 写入本次构建类型 Info.plist 的
@@ -68,7 +68,7 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
   `_dp_nativeplugin.ios` 同步：`dcloud_uniplugins` 按 `hooksClass` + `plugins` 整段重写（离线打包的插件
   注册表，必须与 manifest 的 `nativePlugins` 一致，过期注册会被移除并提示）；`plists` / `capabilities.plists` / `parameters` 写进本次构建类型的
   Info.plist（参数定义在 package.json 没声明时回退 manifest 的 `__plugin_info__.parameters`；
-  声明的参数键一律写入，值为空时写空字符串并告警，因为 SDK 靠键是否存在判断是否集成），
+  参数没填（或解析后为空）时不写占位键，只告警提示插件可能未生效），
   `frameworks` / `resources` / `assets` 写进 `config/custom.yml` 的
   `targetTemplates.uAppBase`（`# >>> uapp nativeplugins` 标记块，每次构建整块重写，插件全关时还原
   `uAppBase: {}`）；`base.yml` 已有的系统库不会重复写（重复依赖会让 xcodegen 丢掉其他 framework）

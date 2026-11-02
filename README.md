@@ -419,7 +419,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 { "locale": "ko", "fallbackLocale": "zh-Hant" }
 ```
 
-- 语言列表 = 根节点 `locale` → `fallbackLocale` → `locale/*.json` 里的语言文件（`uni-app.ko.json` 会归一成 `ko`），去重排序
+- 语言列表 = 根节点 `locale` + `fallbackLocale`（只认 manifest，不扫描 `locale/` 目录：目录里残留的语种文件不会进 App Store 语言列表）
 - **不写这个键，iOS 只认 `CFBundleDevelopmentRegion`**，`uni.getSystemInfoSync().language` 永远是开发语言，应用内多语言不会跟随系统切换
 - `CFBundleDevelopmentRegion`（系统语言不在支持列表时的兜底）跟随 `fallbackLocale`，保证它始终是 `CFBundleLocalizations` 里的一种；没配 `fallbackLocale` 就不动
 - 没配置的字段保持模板原值（模板里的 `fashionkujihk`、`line` 不会被清空）
@@ -455,7 +455,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - `dcloud_uniplugins` 是离线打包的插件注册表，**必须和 manifest 一致**，否则插件等于没引用；CLI 用 `hooksClass` + `plugins[{type,name,class}]` 整段重写该数组，旧的手写/过期注册会被移除并提示
 - `plists` / `capabilities.plists` 合并进本次构建类型的 `Info.plist`（`plists` 优先，嵌套 object 逐层写入，不覆盖同 dict 下已有键）
 - `parameters` 按 `<参数名>` 从 `nativePlugins.<插件标识>` 取值，`key` 用 `:` 分层写入 `Info.plist`，`value` 里的 `${参数名}` 会被替换；参数定义优先用插件 `package.json` 的 `_dp_nativeplugin.ios.parameters`，没声明时回退 manifest 里 HBuilderX 记录的 `__plugin_info__.parameters`（按 `platforms` 过滤掉非 iOS 插件）
-- 声明的参数键**一定会写进 Info.plist**（值是空也写成 `<string></string>`），因为很多 SDK 靠键是否存在判断是否集成；值为空时会打印告警，提示该插件等同未生效
+- 参数没填（或解析后为空）时**不写占位键**，只打印告警提示该插件可能未生效；填了值才写入 Info.plist
 - `frameworks` 里的系统库（`UIKit.framework`、`libz.tbd` 等）写成 `- sdk:`，插件目录里的第三方库写成 `- framework:`；`embedFrameworks` 里的会 `embed` + `codeSign`
 - 插件 `ios` 根目录下的 `.a` / `.framework` / `.xcframework` 自动加入（与云打包一致）
 - `resources` / `assets` 写成 `buildPhase: resources`，无扩展名的目录补 `type: folder`
