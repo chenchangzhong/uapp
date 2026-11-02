@@ -262,7 +262,7 @@ export default function (inputArgs) {
 
       console.log(chalk.green('--- iOS 工程已创建 (本地模板) ---'))
       console.log('下一步:')
-      console.log('1. 根 manifest.json 的 uapp 节点填 ios.package / ios.appkey')
+      console.log('1. 根 manifest.json 的 uapp.ios 节点填 base / test / sim / release 四套 package + appkey')
       console.log('2. 按签名信息修改 ios/config/*.yml 的 PROVISIONING_PROFILE_SPECIFIER 和 export_*.plist (占位符见 ios/README.md)')
       console.log('3. cd ios && xcodegen generate')
       console.log('4. 打包: uapp run build:app-plus base|test|sim|release')
@@ -649,7 +649,7 @@ export default function (inputArgs) {
         } else {
           process.exitCode = 1
           console.log(chalk.red(`无效的 iOS 构建类型: ${buildType}`))
-          console.log('示例: base, test, sim, release')
+          console.log(`示例: ${IOS_BUILD_TYPES.join(', ')}`)
           return
         }
         console.log(
@@ -725,20 +725,35 @@ function loadManifest() {
     console.log(chalk.yellow('manifest.json 中缺少 uapp 节点，请复制并添加如下内容'))
     console.log(`
 "uapp": {
-  "name": "uapp",
   "package": "com.code0xff.uapp",
   "android.appkey": "申请并替换为 android dcloudkey",
-  "ios.appkey": "申请并替换为 ios dcloudkey"
+  "ios": {
+    "base": { "package": "com.code0xff.uapp", "appkey": "base 的 dcloudkey (必填)" },
+    "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey (可选, 未填回退 base)" },
+    "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey (必填)" }
+  }
 },
     `)
     process.exit(1)
   }
 
-  $G.manifest.uapp.name = $G.manifest.uapp[`${$G.projectType}.name`] || $G.manifest.uapp.name || $G.manifest.name
-  $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
+  if ($G.manifest.uapp[`${$G.projectType}.name`] || $G.manifest.uapp.name) {
+    console.log(chalk.yellow('已废弃 uapp.name / uapp.<platform>.name，应用名统一取根节点 manifest.json 的 name'))
+  }
+  $G.manifest.uapp.name = $G.manifest.name
   $G.manifest.uapp.versionName = $G.manifest.uapp[`${$G.projectType}.versionName`] || $G.manifest.uapp.versionName || $G.manifest.versionName
   $G.manifest.uapp.versionCode = $G.manifest.uapp[`${$G.projectType}.versionCode`] ?? $G.manifest.uapp.versionCode ?? $G.manifest.versionCode
-  $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
+  if ($G.projectType === 'ios') {
+    // iOS 的 package/appkey 按构建类型取自 uapp.ios.{base|test|sim|release}, 见 updateIOSMetaData
+    $G.manifest.uapp.package = ''
+    $G.manifest.uapp.appkey = ''
+    if ($G.manifest.uapp['ios.package'] || $G.manifest.uapp['ios.appkey']) {
+      console.log(chalk.yellow('已废弃 uapp["ios.package"] / uapp["ios.appkey"]，请迁移到 uapp.ios.{base|test|sim|release}'))
+    }
+  } else {
+    $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
+    $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
+  }
 }
 
 function checkBuildArtifact(file) {
@@ -813,6 +828,11 @@ function renameApkArtifact(file, channel, isDev) {
 function prepareCommand() {
   let compiledDir = getBuildOut()
   const buildType = $G.args.argv.remain[2] || ''
+  if (!String($G.manifest.name || '').trim()) {
+    console.log(chalk.red('manifest.json 根节点缺少 name，无法确定 App 名称'))
+    console.log('请在 manifest.json 根节点配置 name（uapp.name / uapp.<platform>.name 已废弃）')
+    process.exit(1)
+  }
   if (!buildType.includes('dev') && !['base', 'sim'].includes(buildType) && (!pathExistsSync(compiledDir) || !fs.statSync(compiledDir).isDirectory())) {
     console.log(chalk.red('找不到本地App打包资源'))
     console.log('请使用 HBuilderX => 发行(菜单) => 原生App本地打包 => 生成本地打包App资源')
@@ -869,20 +889,22 @@ function updateAndroidMetaData() {
   content = content.replace(/(versionCode\s*(?:=\s*)?)(\d+)/, '$1' + $G.manifest.uapp.versionCode)
   content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + versionName + '$3')
   content = content.replace(/("DCLOUD_APPKEY"\s*:\s*")(.*)(",)/, '$1' + $G.manifest.uapp.appkey + '$3')
+  content = updateAndroidSdkVersions(content)
 
-  const isWxAppid = !!$G.manifest['app-plus'].distribute.sdkConfigs.oauth?.weixin?.appid
+  const weixin = $G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.weixin
+  const isWxAppid = !!weixin?.appid
   if (isWxAppid) {
     content = content.replace(
       /("WX_APPID"\s+:\s+")(.*)(",)/,
-      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3'
+      '$1' + weixin.appid + '$3'
     )
   }
 
-  const isWxAppsecret = !!$G.manifest['app-plus'].distribute.sdkConfigs.oauth?.weixin?.appsecret
+  const isWxAppsecret = !!weixin?.appsecret
   if (isWxAppsecret) {
     content = content.replace(
       /("WX_SECRET"\s+:\s+")(.*)(",)/,
-      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3'
+      '$1' + weixin.appsecret + '$3'
     )
   }
   fs.writeFileSync(baseGradleFile, content)
@@ -919,7 +941,127 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
   replaceControlXml(path.join($G.appDir, 'app/src/debug/assets/data/dcloud_control.xml'))
   replaceControlXml(path.join($G.appDir, 'app/src/main/assets/data/dcloud_control.xml'))
 
+  updateAndroidManifest()
+
   console.log('✅ updateAndroidMetaData')
+}
+
+// manifest 的 app-plus.distribute.android.minSdkVersion / targetSdkVersion -> app/build.gradle
+function updateAndroidSdkVersions(content) {
+  const android = $G.manifest['app-plus']?.distribute?.android
+  const minSdkVersion = Number(android?.minSdkVersion)
+  const targetSdkVersion = Number(android?.targetSdkVersion)
+
+  if (Number.isFinite(minSdkVersion) && minSdkVersion > 0) {
+    content = content.replace(/(^[ \t]*minSdk(?:Version)?\s+)(\d+)/m, '$1' + minSdkVersion)
+  }
+  if (Number.isFinite(targetSdkVersion) && targetSdkVersion > 0) {
+    content = content.replace(/(^[ \t]*targetSdk(?:Version)?\s+)(\d+)/m, '$1' + targetSdkVersion)
+  }
+
+  return content
+}
+
+// manifest 的 permissions 里是完整的 <uses-permission .../> 行, 取里面的权限名
+function androidPermissionName(entry) {
+  const match = /android\.permission\.[A-Za-z0-9_.]+/.exec(String(entry || ''))
+  return match ? match[0] : ''
+}
+
+// manifest 的 app-plus.distribute.android.permissions / excludePermissions / schemes -> AndroidManifest.xml
+// permissions 只增不删 (工程里手工加的权限保留), excludePermissions 用 tools:node="remove" 排除
+function updateAndroidManifest() {
+  const android = $G.manifest['app-plus']?.distribute?.android
+  const permissions = Array.isArray(android?.permissions) ? android.permissions : []
+  const excludePermissions = Array.isArray(android?.excludePermissions) ? android.excludePermissions : []
+  const schemes = toValueList(android?.schemes)
+  if (!permissions.length && !excludePermissions.length && !schemes.length) return
+
+  const manifestFile = path.join($G.appDir, 'app/src/main/AndroidManifest.xml')
+  if (!fs.existsSync(manifestFile)) return
+
+  let content = fs.readFileSync(manifestFile, 'utf8')
+  const original = content
+  const permissionLineRe = /^[ \t]*<uses-permission\b[^>]*\/>[ \t]*$/gm
+  const hasPermission = (name) => new RegExp(`<uses-permission[^>]*android:name="${escapeRe(name)}"`).test(content)
+
+  const insertPermissionLine = (line) => {
+    const matches = [...content.matchAll(permissionLineRe)]
+    const indent = matches.length ? (/^[ \t]*/.exec(matches[0][0])[0]) : '  '
+    if (matches.length) {
+      const last = matches[matches.length - 1]
+      const insertAt = last.index + last[0].length
+      content = content.slice(0, insertAt) + '\n' + indent + line + content.slice(insertAt)
+    } else {
+      const applicationIndex = content.indexOf('<application')
+      if (applicationIndex === -1) return
+      content = content.slice(0, applicationIndex) + indent + line + '\n\n' + content.slice(applicationIndex)
+    }
+  }
+
+  let addedPermissions = 0
+  permissions.forEach((entry) => {
+    const name = androidPermissionName(entry)
+    if (!name || hasPermission(name)) return
+    insertPermissionLine(`<uses-permission android:name="${name}" />`)
+    addedPermissions++
+  })
+
+  let excludedPermissions = 0
+  excludePermissions.forEach((entry) => {
+    const name = androidPermissionName(entry)
+    if (!name) return
+    const declaredRe = new RegExp(`<uses-permission[^>]*android:name="${escapeRe(name)}"[^>]*/>`)
+    const declared = declaredRe.exec(content)
+    if (declared) {
+      if (/tools:node="remove"/.test(declared[0])) return
+      content = content.replace(declaredRe, `<uses-permission android:name="${name}" tools:node="remove" />`)
+      excludedPermissions++
+      return
+    }
+    insertPermissionLine(`<uses-permission android:name="${name}" tools:node="remove" />`)
+    excludedPermissions++
+  })
+
+  let addedSchemes = 0
+  // scheme 要落在所有带 VIEW intent-filter 的 activity 里 (模板的 PandoraEntry 与 PandoraEntryActivity 都要有)
+  const activityMatches = [...content.matchAll(/<activity\b[\s\S]*?<\/activity>/g)]
+  activityMatches.reverse().forEach((match) => {
+    const block = match[0]
+    const viewOffset = block.indexOf('android.intent.action.VIEW')
+    if (viewOffset === -1) return
+    const filterEnd = block.indexOf('</intent-filter>', viewOffset)
+    if (filterEnd === -1) return
+
+    const beforeCloser = block.slice(0, filterEnd)
+    const missing = schemes.filter((scheme) => {
+      return !new RegExp(`<data[^>]*android:scheme="${escapeRe(scheme)}"`).test(block)
+    })
+    if (!missing.length) return
+
+    // 插到 </intent-filter> 之前, 缩进对齐已有的 <data>, 没有就比闭合标签多两格
+    const closerIndent = /[ \t]*$/.exec(beforeCloser)[0]
+    const dataLine = /^[ \t]*<data\b/m.exec(beforeCloser)
+    const dataIndent = dataLine ? (/^[ \t]*/.exec(dataLine[0])[0]) : closerIndent + '  '
+    const text = missing.map((scheme) => `${dataIndent}<data android:scheme="${scheme}" />\n`).join('')
+    const insertAt = match.index + filterEnd - closerIndent.length
+    content = content.slice(0, insertAt) + text + closerIndent + content.slice(insertAt + closerIndent.length)
+    addedSchemes += missing.length
+  })
+
+  if (schemes.length && !addedSchemes) {
+    const stillMissing = schemes.filter((scheme) => {
+      return !new RegExp(`<data[^>]*android:scheme="${escapeRe(scheme)}"`).test(content)
+    })
+    if (stillMissing.length) {
+      console.log(chalk.yellow(`AndroidManifest.xml 里找不到带 VIEW intent-filter 的 activity，无法写入 scheme: ${stillMissing.join(', ')}`))
+    }
+  }
+
+  if (content === original) return
+
+  fs.writeFileSync(manifestFile, content)
+  console.log(`✅ updateAndroidManifest (permissions: +${addedPermissions}, exclude: ${excludedPermissions}, schemes: +${addedSchemes})`)
 }
 
 function updateAndroidIcons(resDir) {
@@ -948,21 +1090,88 @@ function getIconResourceDir(resDir) {
  * ios platform
  */
 
+const IOS_BUILD_TYPES = ['base', 'test', 'sim', 'release']
+
+// 每个构建类型写入的工程文件 (sim 与 base 共用 yml 和 Info.plist, test 只共用 Info.plist)
+const IOS_TARGET_FILES = {
+  base: { yml: 'uapp_dev.yml', infoPlist: 'AppDev/Info.plist', exportPlist: 'export_dev.plist' },
+  sim: { yml: 'uapp_dev.yml', infoPlist: 'AppDev/Info.plist' },
+  test: { yml: 'uapp_test.yml', infoPlist: 'AppDev/Info.plist', exportPlist: 'export_test.plist' },
+  release: { yml: 'uapp_release.yml', infoPlist: 'AppRelease/Info.plist', exportPlist: 'export_release.plist' }
+}
+
+// uapp.ios.{base|test|sim|release} 的 package/appkey; test/sim 未填的字段回退 base
+function resolveIOSConfig(buildType) {
+  const ios = $G.manifest.uapp.ios || {}
+  const base = ios.base || {}
+  const own = ios[buildType] || {}
+  const inheritsBase = buildType === 'test' || buildType === 'sim'
+  const read = (obj, field) => String(obj[field] || '').trim()
+  const ownPackage = read(own, 'package')
+  const ownAppkey = read(own, 'appkey')
+  const basePackage = inheritsBase ? read(base, 'package') : ''
+  const baseAppkey = inheritsBase ? read(base, 'appkey') : ''
+
+  return {
+    package: ownPackage || basePackage,
+    appkey: ownAppkey || baseAppkey,
+    packageFromBase: !ownPackage && !!basePackage,
+    appkeyFromBase: !ownAppkey && !!baseAppkey
+  }
+}
+
+function requireIOSConfig(buildType) {
+  if (!IOS_BUILD_TYPES.includes(buildType)) {
+    console.log(chalk.red(`无效的 iOS 构建类型: ${buildType || '(未指定)'}`))
+    console.log(`示例: ${IOS_BUILD_TYPES.join(', ')}`)
+    process.exit(1)
+  }
+
+  const config = resolveIOSConfig(buildType)
+  const missing = []
+  if (!config.package) missing.push('package')
+  if (!config.appkey) missing.push('appkey')
+  if (missing.length > 0) {
+    const fields = missing.join(' / ')
+    const hint = buildType === 'test' || buildType === 'sim'
+      ? `uapp.ios.${buildType}.{${fields}} 与 uapp.ios.base.{${fields}} 均未配置`
+      : `uapp.ios.${buildType}.{${fields}} 未配置`
+    console.log(chalk.red(`缺少 iOS ${buildType} 构建配置: ${hint}`))
+    console.log('base / release 必填；test / sim 未填时回退 base')
+    process.exit(1)
+  }
+
+  return config
+}
+
 function updateIOSMetaData() {
-  let baseYamlFile = path.join($G.appDir, 'config/base.yml')
-  let content = fs.readFileSync(baseYamlFile, 'utf8')
-  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
+  const rawBuildType = $G.args.argv.remain[2] || ''
+  // uapp prepare 没有构建类型 (或沿用 android 的 dev), 无法确定 package/appkey, 只做与类型无关的更新
+  const isPrepare = $G.args.argv.remain[0] === 'prepare'
+  const config = isPrepare && !IOS_BUILD_TYPES.includes(rawBuildType) ? null : requireIOSConfig(rawBuildType)
+  const targetFiles = config ? IOS_TARGET_FILES[rawBuildType] : null
 
-  content = content.replace(/(PRODUCT_BUNDLE_IDENTIFIER: )(.*)/, '$1' + $G.manifest.uapp.package)
-  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + versionName)
-  content = content.replace(/(CURRENT_PROJECT_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionCode)
-  fs.writeFileSync(baseYamlFile, content)
+  if (config) {
+    $G.manifest.uapp.package = config.package
+    $G.manifest.uapp.appkey = config.appkey
+    updateIOSBundleId(targetFiles.yml, config.package)
+    updateIOSExportProfile(targetFiles.exportPlist, config.package)
+  } else {
+    console.log(chalk.yellow('未指定 iOS 构建类型，跳过包名 / appkey 写入'))
+    console.log('打包请用 uapp run build:app-plus base|test|sim|release')
+  }
 
-  replaceStoryboard(path.join($G.appDir, 'Main/Resources/LaunchScreen.storyboard'))
-  replaceStoryboard(path.join($G.appDir, 'Main/Resources/LaunchScreenAD.storyboard'))
+  updateIOSVersions()
 
-  replaceInfoPlist(path.join($G.appDir, 'Main/Resources/AppDev/Info.plist'))
-  replaceInfoPlist(path.join($G.appDir, 'Main/Resources/AppRelease/Info.plist'))
+  if (config) {
+    const infoPlistFile = path.join($G.appDir, 'Main/Resources/', targetFiles.infoPlist)
+    replaceInfoPlist(infoPlistFile)
+    updateIOSPrivacyDescription(infoPlistFile)
+    updateIOSLocalizations(infoPlistFile)
+    updateIOSScreenOrientation(infoPlistFile)
+    updateIOSUrlSchemes(infoPlistFile)
+    updateIOSNativePlugins(infoPlistFile)
+  }
 
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppDev/control.xml'))
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppRelease/control.xml'))
@@ -978,16 +1187,714 @@ function updateIOSMetaData() {
     }
   }
 
-  console.log('✅ updateIOSMetaData')
+  console.log(config ? `✅ updateIOSMetaData (${rawBuildType}: ${config.package})` : '✅ updateIOSMetaData (仅版本/资源)')
 }
 
-function replaceStoryboard(storyboardFile) {
-  // 项目可能没有 LaunchScreenAD.storyboard (未启用开屏广告), 跳过
-  if (!fs.existsSync(storyboardFile)) return
-  let content = fs.readFileSync(storyboardFile, 'utf8')
-  const re = /(text=")(.+?)(".+)(?=uapp-launchscreen-appname)/
-  content = content.replace(re, '$1' + $G.manifest.uapp.name + '$3')
-  fs.writeFileSync(storyboardFile, content)
+function updateIOSVersions() {
+  let baseYamlFile = path.join($G.appDir, 'config/base.yml')
+  let content = fs.readFileSync(baseYamlFile, 'utf8')
+  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
+
+  content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + versionName)
+  content = content.replace(/(CURRENT_PROJECT_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionCode)
+  fs.writeFileSync(baseYamlFile, content)
+}
+
+function updateIOSBundleId(ymlName, bundleId) {
+  let ymlFile = path.join($G.appDir, 'config', ymlName)
+  if (!fs.existsSync(ymlFile)) {
+    console.log(chalk.red(`找不到 ${ymlName}，无法写入包名`))
+    process.exit(1)
+  }
+  let content = fs.readFileSync(ymlFile, 'utf8')
+  const re = /^(\s*PRODUCT_BUNDLE_IDENTIFIER:\s*)(.*)$/m
+  if (!re.test(content)) {
+    console.log(chalk.red(`${ymlName} 中缺少 PRODUCT_BUNDLE_IDENTIFIER，无法写入包名`))
+    process.exit(1)
+  }
+
+  content = content.replace(re, (match, head) => head + bundleId)
+  fs.writeFileSync(ymlFile, content)
+}
+
+function updateIOSExportProfile(exportPlistName, bundleId) {
+  // sim 没有导出配置
+  if (!exportPlistName) return
+  let plistFile = path.join($G.appDir, 'config', exportPlistName)
+  // 缺 export_release.plist 由构建阶段报错
+  if (!fs.existsSync(plistFile)) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  const re = /(<key>provisioningProfiles<\/key>\s*<dict>[\s\S]*?<key>)([^<]+)(<\/key>)/
+  if (!re.test(content)) {
+    console.log(chalk.red(`${exportPlistName} 的 provisioningProfiles 缺少 bundle id 条目，无法写入包名`))
+    process.exit(1)
+  }
+
+  content = content.replace(re, (match, head, oldBundleId, tail) => head + bundleId + tail)
+  fs.writeFileSync(plistFile, content)
+}
+
+function escapePlistValue(value) {
+  return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function escapeRe(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// manifest 的 app-plus.distribute.ios.privacyDescription 里是 Info.plist 原生的权限键名,
+// 云端打包由 DCloud 写入, 本地打包需要自己同步: 已存在的键覆盖, 模板里没有的键插到根 dict 末尾
+function updateIOSPrivacyDescription(plistFile) {
+  const privacy = $G.manifest['app-plus']?.distribute?.ios?.privacyDescription
+  if (!privacy) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  let updated = 0
+  Object.keys(privacy).forEach((key) => {
+    const value = escapePlistValue(privacy[key])
+    const re = new RegExp(`(<key>${escapeRe(key)}</key>\\n\\s*<string>)([\\s\\S]*?)(</string>)`)
+    if (re.test(content)) {
+      content = content.replace(re, (match, head, oldValue, tail) => head + value + tail)
+    } else {
+      const index = content.lastIndexOf('</dict>')
+      content = content.slice(0, index) + `\t<key>${key}</key>\n\t<string>${value}</string>\n` + content.slice(index)
+    }
+    updated++
+  })
+
+  fs.writeFileSync(plistFile, content)
+  console.log(`✅ updateIOSPrivacyDescription (${updated} 项)`)
+}
+
+// 数组或逗号分隔字符串 -> 去空的字符串数组 (ios urltypes / urlschemewhitelist, android schemes 共用)
+function toValueList(value) {
+  if (!value) return []
+  const list = Array.isArray(value) ? value : String(value).split(',')
+  return list.map((item) => String(item).trim()).filter(Boolean)
+}
+
+// 找到 fromIndex 之后那个 <array> 的 </array> 位置, 处理嵌套
+function findArrayEnd(content, fromIndex) {
+  const start = content.indexOf('<array>', fromIndex)
+  if (start === -1) return -1
+  const re = /<\/?array>/g
+  re.lastIndex = start
+  let depth = 0
+  let match
+  while ((match = re.exec(content))) {
+    depth += match[0] === '</array>' ? -1 : 1
+    if (depth === 0) return match.index
+  }
+  return -1
+}
+
+// 替换 fromIndex 之后第一个 <array>…</array> 的内容, 沿用原有缩进
+function replacePlistArray(content, fromIndex, items) {
+  const start = content.indexOf('<array>', fromIndex)
+  const end = start === -1 ? -1 : findArrayEnd(content, start)
+  if (start === -1 || end === -1) return null
+  const inner = content.slice(start + '<array>'.length, end)
+  const first = inner.indexOf('<string>')
+  const itemIndent = first === -1 ? '\t\t\t\t' : (/[ \t]*$/.exec(inner.slice(0, first))[0] || '\t\t\t\t')
+  const lastLine = inner.slice(inner.lastIndexOf('\n') + 1)
+  const closeIndent = /^[ \t]*$/.test(lastLine) ? lastLine : '\t\t\t'
+  const body = items.map((item) => `${itemIndent}<string>${escapePlistValue(item)}</string>`).join('\n')
+  return content.slice(0, start) + `<array>\n${body}\n${closeIndent}</array>` + content.slice(end + '</array>'.length)
+}
+
+function urlTypeDict(urlName, schemes) {
+  const body = schemes.map((item) => `\t\t\t\t<string>${escapePlistValue(item)}</string>`).join('\n')
+  return `\t\t<dict>\n\t\t\t<key>CFBundleTypeRole</key>\n\t\t\t<string>Editor</string>\n\t\t\t<key>CFBundleURLName</key>\n\t\t\t<string>${urlName}</string>\n\t\t\t<key>CFBundleURLSchemes</key>\n\t\t\t<array>\n${body}\n\t\t\t</array>\n\t\t</dict>\n`
+}
+
+// 修改 CFBundleURLTypes 里 CFBundleURLName 为 urlName 那条的 schemes; 模板里没有就追加一条
+function upsertUrlType(content, urlName, schemes) {
+  const markerIndex = content.indexOf(`<string>${urlName}</string>`)
+  if (markerIndex !== -1) return replacePlistArray(content, markerIndex, schemes) || content
+
+  const typesIndex = content.indexOf('<key>CFBundleURLTypes</key>')
+  if (typesIndex !== -1) {
+    const start = content.indexOf('<array>', typesIndex)
+    const end = findArrayEnd(content, typesIndex)
+    if (start === -1 || end === -1) return content
+    const inner = content.slice(start + '<array>'.length, end)
+    const closer = inner.slice(inner.lastIndexOf('\n') + 1)
+    const closeIndent = /^[ \t]*$/.test(closer) ? closer : ''
+    const head = closeIndent ? inner.slice(0, inner.length - closer.length) : `${inner}\n`
+    const itemMatch = head.match(/\n([ \t]*)<dict>/)
+    const dict = urlTypeDict(urlName, schemes).replace(/^\t\t/, itemMatch ? itemMatch[1] : '\t\t')
+    return content.slice(0, start + '<array>'.length) + head + dict + closeIndent + content.slice(end)
+  }
+
+  const rootEnd = content.lastIndexOf('</dict>')
+  if (rootEnd === -1) return content
+  return content.slice(0, rootEnd) + `\t<key>CFBundleURLTypes</key>\n\t<array>\n${urlTypeDict(urlName, schemes)}\t</array>\n` + content.slice(rootEnd)
+}
+
+function upsertPlistString(content, key, value) {
+  const re = new RegExp(`(<key>${escapeRe(key)}</key>\\n\\s*<string>)([\\s\\S]*?)(</string>)`)
+  if (re.test(content)) {
+    return content.replace(re, (match, head, oldValue, tail) => head + escapePlistValue(value) + tail)
+  }
+  const index = content.lastIndexOf('</dict>')
+  if (index === -1) return content
+  return content.slice(0, index) + `\t<key>${key}</key>\n\t<string>${escapePlistValue(value)}</string>\n` + content.slice(index)
+}
+
+// manifest 标准字段: ios.urltypes -> CFBundleURLName=scheme 的 schemes,
+// ios.urlschemewhitelist -> LSApplicationQueriesSchemes,
+// sdkConfigs.oauth.google.clientid -> GIDClientID 原值 + google_url 用倒序
+function updateIOSUrlSchemes(plistFile) {
+  const ios = $G.manifest['app-plus']?.distribute?.ios
+  const urltypes = toValueList(ios?.urltypes)
+  const urlSchemeWhitelist = toValueList(ios?.urlschemewhitelist)
+  const googleClientId = String($G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.google?.clientid || '').trim()
+  if (!urltypes.length && !urlSchemeWhitelist.length && !googleClientId) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  if (urltypes.length) content = upsertUrlType(content, 'scheme', urltypes)
+  if (googleClientId) {
+    content = upsertUrlType(content, 'google_url', [googleClientId.split('.').reverse().join('.')])
+    content = upsertPlistString(content, 'GIDClientID', googleClientId)
+  }
+  if (urlSchemeWhitelist.length) {
+    const queriesIndex = content.indexOf('<key>LSApplicationQueriesSchemes</key>')
+    if (queriesIndex !== -1) {
+      content = replacePlistArray(content, queriesIndex, urlSchemeWhitelist) || content
+    } else {
+      const index = content.lastIndexOf('</dict>')
+      const body = urlSchemeWhitelist.map((item) => `\t\t<string>${escapePlistValue(item)}</string>`).join('\n')
+      content = content.slice(0, index) + `\t<key>LSApplicationQueriesSchemes</key>\n\t<array>\n${body}\n\t</array>\n` + content.slice(index)
+    }
+  }
+
+  fs.writeFileSync(plistFile, content)
+  console.log(`✅ updateIOSUrlSchemes (scheme: ${urltypes.length}, queries: ${urlSchemeWhitelist.length}, google: ${googleClientId ? 'yes' : 'no'})`)
+}
+
+// manifest 根节点的 locale / fallbackLocale + locale/*.json 决定 iOS 的本地化列表。
+// 不写 CFBundleLocalizations 时 iOS 只认 CFBundleDevelopmentRegion, uni.getSystemInfo 的
+// language 永远是开发语言, 应用内多语言不会跟随系统.
+function getIOSLocalizationLanguages() {
+  const languages = []
+  const push = (value) => {
+    const item = String(value || '').trim()
+    if (item && !languages.includes(item)) languages.push(item)
+  }
+
+  push($G.manifest.locale)
+  push($G.manifest.fallbackLocale)
+
+  const dir = path.join($G.webAppDir, 'locale')
+  if (fs.existsSync(dir)) {
+    fs.readdirSync(dir)
+      .filter((file) => file.endsWith('.json'))
+      .map((file) => file.replace(/^uni-app\./, '').replace(/\.json$/, ''))
+      .filter((name) => /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/.test(name))
+      .sort()
+      .forEach(push)
+  }
+
+  return languages
+}
+
+function updateIOSLocalizations(plistFile) {
+  const languages = getIOSLocalizationLanguages()
+  if (!languages.length) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  const key = 'CFBundleLocalizations'
+  const keyIndex = content.indexOf(`<key>${key}</key>`)
+  const items = languages.map((item) => `\t\t<string>${escapePlistValue(item)}</string>`).join('\n')
+  const array = `<array>\n${items}\n\t</array>`
+
+  if (keyIndex === -1) {
+    const rootEnd = content.lastIndexOf('</dict>')
+    if (rootEnd === -1) return
+    content = content.slice(0, rootEnd)
+      + `\t<key>${key}</key>\n\t${array}\n`
+      + content.slice(rootEnd)
+  } else {
+    const token = /<array\s*\/>|<array>/.exec(content.slice(keyIndex))
+    if (!token) return
+    const arrayStart = keyIndex + token.index
+    const selfClosing = token[0] !== '<array>'
+    const arrayEnd = selfClosing ? arrayStart + token[0].length : findArrayEnd(content, arrayStart)
+    if (arrayEnd === -1) return
+    content = content.slice(0, arrayStart)
+      + array
+      + content.slice(selfClosing ? arrayEnd : arrayEnd + '</array>'.length)
+  }
+
+  // 兜底语言跟随 fallbackLocale, 保证它始终是 CFBundleLocalizations 里的一种
+  const developmentRegion = String($G.manifest.fallbackLocale || '').trim()
+  if (developmentRegion) {
+    content = upsertPlistString(content, 'CFBundleDevelopmentRegion', developmentRegion)
+  }
+
+  fs.writeFileSync(plistFile, content)
+  console.log(`✅ updateIOSLocalizations (${languages.join(', ')}${developmentRegion ? `, 兜底: ${developmentRegion}` : ''})`)
+}
+
+// manifest 的 app-plus.screenOrientation -> UISupportedInterfaceOrientations (+ ~ipad)
+// uni-app 用 portrait-primary/portrait-secondary/landscape-primary/landscape-secondary 描述方向
+const IOS_SCREEN_ORIENTATIONS = {
+  'portrait-primary': 'UIInterfaceOrientationPortrait',
+  'portrait-secondary': 'UIInterfaceOrientationPortraitUpsideDown',
+  'landscape-primary': 'UIInterfaceOrientationLandscapeLeft',
+  'landscape-secondary': 'UIInterfaceOrientationLandscapeRight'
+}
+
+function getIOSSupportedOrientations() {
+  const value = $G.manifest['app-plus']?.screenOrientation
+  const list = Array.isArray(value) ? value : String(value || '').split(',')
+  const orientations = []
+
+  list.forEach((item) => {
+    const orientation = IOS_SCREEN_ORIENTATIONS[String(item).trim()]
+    if (orientation && !orientations.includes(orientation)) orientations.push(orientation)
+  })
+
+  return orientations
+}
+
+function updateIOSScreenOrientation(plistFile) {
+  const orientations = getIOSSupportedOrientations()
+  if (!orientations.length) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  let updated = 0
+  ;['UISupportedInterfaceOrientations', 'UISupportedInterfaceOrientations~ipad'].forEach((key) => {
+    const keyIndex = content.indexOf(`<key>${key}</key>`)
+    if (keyIndex === -1) return
+    const next = replacePlistArray(content, keyIndex, orientations)
+    if (!next) return
+    content = next
+    updated++
+  })
+  if (!updated) return
+
+  fs.writeFileSync(plistFile, content)
+  const names = orientations.map((item) => item.replace('UIInterfaceOrientation', '')).join(', ')
+  console.log(`✅ updateIOSScreenOrientation (${names})`)
+}
+
+// ---- 原生插件 ----
+
+// <webAppDir>/nativeplugins/<插件标识>/package.json 里的 _dp_nativeplugin.ios
+function getIOSNativePlugins() {
+  const nativePlugins = $G.manifest['app-plus']?.nativePlugins || {}
+  const plugins = []
+
+  Object.keys(nativePlugins).forEach((id) => {
+    const dir = path.join($G.webAppDir, 'nativeplugins', id)
+    const packageFile = path.join(dir, 'package.json')
+    if (!fs.existsSync(packageFile)) {
+      console.log(chalk.yellow(`未找到原生插件 ${id}（${packageFile}），跳过 iOS 插件配置同步`))
+      return
+    }
+
+    let ios = null
+    try {
+      ios = JSON.parse(fs.readFileSync(packageFile, 'utf8'))._dp_nativeplugin?.ios
+    } catch (error) {
+      console.log(chalk.yellow(`原生插件 ${id} 的 package.json 解析失败：${error.message}`))
+      return
+    }
+    if (!ios) {
+      console.log(chalk.yellow(`原生插件 ${id} 没有 iOS 平台配置，跳过`))
+      return
+    }
+
+    plugins.push({ id, dir, ios, parameters: nativePlugins[id] || {} })
+  })
+
+  return plugins
+}
+
+function plistValueXml(value, pad) {
+  if (Array.isArray(value)) {
+    const items = value.map((item) => `${pad}\t` + plistValueXml(item, `${pad}\t`)).join('\n')
+    return `<array>\n${items}\n${pad}</array>`
+  }
+  if (value && typeof value === 'object') {
+    const items = Object.keys(value).map((key) => buildPlistEntry([key], value[key], `${pad}\t`)).join('\n')
+    return `<dict>\n${items}\n${pad}</dict>`
+  }
+  if (value === undefined || value === null) return '<string></string>'
+  if (typeof value === 'boolean') return value ? '<true/>' : '<false/>'
+  if (typeof value === 'number') return Number.isInteger(value) ? `<integer>${value}</integer>` : `<real>${value}</real>`
+  return `<string>${escapePlistValue(value)}</string>`
+}
+
+function buildPlistEntry(keyPath, value, pad) {
+  const [key, ...rest] = keyPath
+  if (rest.length) return `${pad}<key>${key}</key>\n${pad}<dict>\n${buildPlistEntry(rest, value, `${pad}\t`)}\n${pad}</dict>`
+  return `${pad}<key>${key}</key>\n${pad}${plistValueXml(value, pad)}`
+}
+
+// dict 内部第一行子元素的缩进，用作新增子元素的缩进
+function detectPlistPad(dictInner, fallback) {
+  const match = /\n([ \t]*)\S/.exec(dictInner)
+  return match ? match[1] : fallback
+}
+
+// 返回 content 中 start 处 XML 元素的结束位置（含闭合标签）；自闭合标签如 <true/> 直接返回
+function findElementEnd(content, start) {
+  const match = /^<([A-Za-z][\w-]*)\s*(\/?)>/.exec(content.slice(start))
+  if (!match) return null
+
+  const [tag, selfClosing] = match.slice(1)
+  if (selfClosing) return { end: start + match[0].length, tag }
+
+  const re = new RegExp(`</?${tag}\\s*>`, 'g')
+  re.lastIndex = start
+  let depth = 0
+  let item
+  while ((item = re.exec(content))) {
+    depth += item[0][1] === '/' ? -1 : 1
+    if (depth === 0) return { end: item.index + item[0].length, tag }
+  }
+  return null
+}
+
+// 在 dict 内部文本里设置 keyPath 指向的值，已存在的键沿用原缩进
+function setPlistInDict(dictInner, keyPath, value, pad) {
+  const [key, ...rest] = keyPath
+  const keyToken = `<key>${key}</key>`
+  const keyIndex = dictInner.indexOf(keyToken)
+  if (keyIndex === -1) {
+    const tail = /\n([ \t]*)$/.exec(dictInner)
+    const closingIndent = tail ? tail[1] : ''
+    const body = tail ? dictInner.slice(0, tail.index) : dictInner
+    return `${body}\n${buildPlistEntry(keyPath, value, pad)}\n${closingIndent}`
+  }
+
+  let cursor = keyIndex + keyToken.length
+  while (cursor < dictInner.length && /\s/.test(dictInner[cursor])) cursor += 1
+  const element = findElementEnd(dictInner, cursor)
+  if (!element) return dictInner
+
+  if (rest.length) {
+    if (element.tag !== 'dict') return dictInner
+    const innerStart = cursor + '<dict>'.length
+    const inner = dictInner.slice(innerStart, element.end - '</dict>'.length)
+    const nextInner = setPlistInDict(inner, rest, value, detectPlistPad(inner, `${pad}\t`))
+    return dictInner.slice(0, innerStart) + nextInner + dictInner.slice(element.end - '</dict>'.length)
+  }
+
+  // 连同已有缩进一起替换，避免缩进叠加
+  const existingPad = /([ \t]*)$/.exec(dictInner.slice(0, keyIndex))
+  const entryPad = existingPad ? existingPad[1] : pad
+  const replaceStart = keyIndex - entryPad.length
+  return dictInner.slice(0, replaceStart) + buildPlistEntry(keyPath, value, entryPad) + dictInner.slice(element.end)
+}
+
+function updatePlistRoot(content, entries) {
+  const start = content.indexOf('<dict>')
+  if (start === -1) return null
+
+  const element = findElementEnd(content, start)
+  if (!element) return null
+
+  const innerStart = start + '<dict>'.length
+  let inner = content.slice(innerStart, element.end - '</dict>'.length)
+  entries.forEach(([keyPath, value]) => {
+    inner = setPlistInDict(inner, keyPath, value, detectPlistPad(inner, '\t'))
+  })
+
+  return content.slice(0, innerStart) + inner + content.slice(element.end - '</dict>'.length)
+}
+
+// 嵌套 object 展开成 [[keyPath], value]，避免整块覆盖已有的 dict
+function collectPlistEntries(value, prefix = []) {
+  const entries = []
+  Object.keys(value).forEach((key) => {
+    const child = value[key]
+    if (child && typeof child === 'object' && !Array.isArray(child)) {
+      entries.push(...collectPlistEntries(child, [...prefix, key]))
+    } else {
+      entries.push([[...prefix, key], child])
+    }
+  })
+  return entries
+}
+
+// 插件参数定义: 优先 package.json 的 _dp_nativeplugin.ios.parameters,
+// package.json 没声明时用 manifest 里 HBuilderX 记录的 __plugin_info__.parameters
+function getIOSPluginParameterDefinitions(ios, parameters) {
+  const definitions = { ...(ios.parameters || {}) }
+  const info = parameters?.__plugin_info__
+  if (!info?.parameters || (info.platforms && !/iOS/i.test(info.platforms))) return definitions
+
+  Object.keys(info.parameters).forEach((name) => {
+    if (!definitions[name] && info.parameters[name]?.key) definitions[name] = info.parameters[name]
+  })
+  return definitions
+}
+
+function getIOSNativePluginPlistEntries(plugins) {
+  const entries = []
+  plugins.forEach(({ ios, parameters }) => {
+    // plists 优先级高于 capabilities.plists
+    const plists = { ...(ios.capabilities?.plists || {}), ...(ios.plists || {}) }
+    entries.push(...collectPlistEntries(plists))
+
+    const definitions = getIOSPluginParameterDefinitions(ios, parameters)
+    Object.keys(definitions).forEach((name) => {
+      const definition = definitions[name] || {}
+      if (!definition.key) return
+
+      const template = definition.value === undefined || definition.value === null ? '' : String(definition.value)
+      const rawValue = parameters[name]
+      const hasRawValue = rawValue !== undefined && rawValue !== null && rawValue !== ''
+      // 插件声明的参数键必须出现在 Info.plist 里, 值为空也写入空字符串
+      const formatted = template.includes(`\${${name}}`)
+        ? template.split(`\${${name}}`).join(hasRawValue ? String(rawValue) : '')
+        : hasRawValue
+          ? rawValue
+          : template
+
+      entries.push([definition.key.split(':'), formatted])
+    })
+  })
+  return entries
+}
+
+function warnMissingIOSPluginPrivacies(content, plugins) {
+  const missing = []
+  plugins.forEach(({ id, ios }) => {
+    ;(ios.privacies || []).forEach((key) => {
+      if (!content.includes(`<key>${key}</key>`)) missing.push(`${id}: ${key}`)
+    })
+  })
+  if (missing.length) {
+    console.log(chalk.yellow(`原生插件需要的隐私描述未配置，请在 app-plus.distribute.ios.privacyDescription 补齐：${missing.join(', ')}`))
+  }
+}
+
+function toIOSProjectPath(target) {
+  return path.relative($G.appDir, target).split(path.sep).join('/')
+}
+
+// 插件 frameworks / resources 转换成 xcodegen 的 targetTemplates.uAppBase 配置
+function buildIOSNativePluginYml(plugins) {
+  const dependencies = []
+  const sources = []
+  const baseYml = path.join($G.appDir, 'config/base.yml')
+  const seenDependencies = new Set()
+  const seenSources = new Set()
+
+  // base.yml 里已有的系统库 / 静态库不能重复写，xcodegen 校验到重复依赖会丢掉其他 framework 依赖
+  if (fs.existsSync(baseYml)) {
+    const baseContent = fs.readFileSync(baseYml, 'utf8')
+    for (const match of baseContent.matchAll(/^\s*-\s*(?:sdk|framework):\s*([^\s#]+)/gm)) {
+      seenDependencies.add(match[1])
+    }
+  }
+
+  plugins.forEach(({ dir, ios }) => {
+    const iosDir = path.join(dir, 'ios')
+    const embedFrameworks = new Set(ios.embedFrameworks || [])
+    const frameworks = [...(ios.frameworks || [])]
+
+    // 插件 ios 根目录下的静态库，云打包同样会自动加入 target
+    if (fs.existsSync(iosDir)) {
+      fs.readdirSync(iosDir).forEach((file) => {
+        if (/\.(a|framework|xcframework)$/.test(file) && !frameworks.includes(file)) frameworks.push(file)
+      })
+    }
+
+    frameworks.forEach((name) => {
+      const target = path.join(iosDir, name)
+      const exists = fs.existsSync(target)
+      if (!exists && (/\.(tbd|dylib)$/.test(name) || (!name.includes('/') && name.endsWith('.framework')))) {
+        if (seenDependencies.has(name)) return
+        seenDependencies.add(name)
+        dependencies.push(`- sdk: ${name}`)
+        return
+      }
+
+      const projectPath = toIOSProjectPath(target)
+      if (seenDependencies.has(projectPath)) return
+      seenDependencies.add(projectPath)
+
+      const embed = exists && embedFrameworks.has(name) && /\.(framework|xcframework)$/.test(name)
+      dependencies.push(`- framework: ${projectPath}`, `  embed: ${embed}`, `  codeSign: ${embed}`)
+    })
+
+    ;[...(ios.resources || []), ...(ios.assets || [])].forEach((resource) => {
+      const target = path.join(iosDir, resource)
+      const line = `- path: ${toIOSProjectPath(target)}`
+      if (seenSources.has(line)) return
+      seenSources.add(line)
+
+      sources.push(line)
+      if (fs.existsSync(target) && fs.statSync(target).isDirectory() && !/\.\w+$/.test(resource)) {
+        sources.push('  type: folder')
+      }
+      sources.push('  buildPhase: resources')
+    })
+  })
+
+  return { dependencies, sources }
+}
+
+function updateIOSCustomYml({ dependencies, sources }) {
+  const customFile = path.join($G.appDir, 'config/custom.yml')
+  if (!fs.existsSync(customFile)) return
+
+  let content = fs.readFileSync(customFile, 'utf8')
+  const markerStart = '        # >>> uapp nativeplugins (自动生成, 勿手改)'
+  const markerEnd = '        # <<< uapp nativeplugins'
+
+  const blocks = []
+  if (dependencies.length) blocks.push(`        dependencies:\n${dependencies.map((line) => `            ${line}`).join('\n')}`)
+  if (sources.length) blocks.push(`        sources:\n${sources.map((line) => `            ${line}`).join('\n')}`)
+
+  const generated = blocks.length ? `    uAppBase:\n${markerStart}\n${blocks.join('\n')}\n${markerEnd}` : '    uAppBase: {}'
+  const startMarkerIndex = content.indexOf(markerStart)
+
+  if (startMarkerIndex !== -1) {
+    const endMarkerIndex = content.indexOf(markerEnd, startMarkerIndex)
+    const headerIndex = content.lastIndexOf('    uAppBase:', startMarkerIndex)
+    if (endMarkerIndex === -1 || headerIndex === -1) {
+      console.log(chalk.yellow('config/custom.yml 的原生插件标记块不完整，已跳过写入'))
+      return
+    }
+    content = content.slice(0, headerIndex) + generated + content.slice(endMarkerIndex + markerEnd.length)
+  } else if (/^ {4}uAppBase:\s*\{\}\s*$/m.test(content)) {
+    content = content.replace(/^ {4}uAppBase:\s*\{\}\s*$/m, () => generated)
+  } else {
+    console.log(chalk.yellow('config/custom.yml 的 targetTemplates.uAppBase 已被自定义，未写入原生插件依赖'))
+    return
+  }
+
+  fs.writeFileSync(customFile, content.endsWith('\n') ? content : `${content}\n`)
+}
+
+function warnEmptyIOSPluginParameters(plugins) {
+  const empty = []
+  plugins.forEach(({ id, ios, parameters }) => {
+    const definitions = getIOSPluginParameterDefinitions(ios, parameters)
+    Object.keys(definitions).forEach((name) => {
+      if (!definitions[name]?.key) return
+      const rawValue = parameters[name]
+      if (rawValue === undefined || rawValue === null || rawValue === '') empty.push(`${id}.${name}`)
+    })
+  })
+  if (empty.length) {
+    console.log(chalk.yellow(`原生插件参数为空，Info.plist 里会写成空字符串（插件等同未生效）：${empty.join(', ')}`))
+  }
+}
+
+// dcloud_uniplugins 里一条插件注册 (离线打包靠它把 uni_modules 原生插件挂进运行时)
+function unipluginsEntry(ios, pad) {
+  const inner = `${pad}\t`
+  const lines = [`${pad}<dict>`]
+  if (ios.hooksClass) {
+    lines.push(`${inner}<key>hooksClass</key>`, `${inner}<string>${escapePlistValue(ios.hooksClass)}</string>`)
+  }
+
+  const modules = Array.isArray(ios.plugins) ? ios.plugins : []
+  lines.push(`${inner}<key>plugins</key>`, `${inner}<array>`)
+  modules.forEach((item) => {
+    const modulePad = `${inner}\t\t`
+    lines.push(`${inner}\t<dict>`)
+    ;['type', 'name', 'class'].forEach((key) => {
+      if (item[key] === undefined || item[key] === null) return
+      lines.push(`${modulePad}<key>${key}</key>`, `${modulePad}<string>${escapePlistValue(item[key])}</string>`)
+    })
+    lines.push(`${inner}\t</dict>`)
+  })
+  lines.push(`${inner}</array>`, `${pad}</dict>`)
+  return lines.join('\n')
+}
+
+// 用 package.json 的 hooksClass / plugins 重写 dcloud_uniplugins:
+// 该数组是离线打包的插件注册表, 必须与 manifest 的 nativePlugins 保持一致,
+// 所以整段重写, 不在 manifest 里的旧注册会被移除并提示
+function updateIOSUniplugins(plistFile, plugins) {
+  const nativePlugins = $G.manifest['app-plus']?.nativePlugins || {}
+  const manifestType = typeof nativePlugins === 'object' && nativePlugins !== null
+  if (!manifestType) return
+
+  let content = fs.readFileSync(plistFile, 'utf8')
+  const keyIndex = content.indexOf('<key>dcloud_uniplugins</key>')
+  const pad = keyIndex === -1 ? '\t' : (/[ \t]*$/.exec(content.slice(0, keyIndex))[0] || '\t')
+  const fresh = plugins.map((plugin) => unipluginsEntry(plugin.ios, `${pad}\t`))
+  const label = plugins.map((plugin) => plugin.id).join(', ')
+
+  if (keyIndex === -1) {
+    if (!fresh.length) return
+    const rootEnd = content.lastIndexOf('</dict>')
+    if (rootEnd === -1) return
+    const updated = content.slice(0, rootEnd)
+      + `${pad}<key>dcloud_uniplugins</key>\n${pad}<array>\n${fresh.join('\n')}\n${pad}</array>\n`
+      + content.slice(rootEnd)
+    if (updated !== content) {
+      fs.writeFileSync(plistFile, updated)
+      console.log(`✅ updateIOSUniplugins (${label})`)
+    }
+    return
+  }
+
+  const token = /<array\s*\/>|<array>/.exec(content.slice(keyIndex))
+  const arrayStart = token ? keyIndex + token.index : -1
+  const selfClosing = token ? token[0] !== '<array>' : false
+  const arrayEnd = arrayStart === -1
+    ? -1
+    : selfClosing
+      ? arrayStart + token[0].length
+      : findArrayEnd(content, arrayStart)
+  if (arrayStart === -1 || arrayEnd === -1) {
+    console.log(chalk.yellow('Info.plist 的 dcloud_uniplugins 结构无法解析，已跳过写入'))
+    return
+  }
+
+  const inner = selfClosing ? '' : content.slice(arrayStart + '<array>'.length, arrayEnd)
+  const removed = []
+  for (const match of inner.matchAll(/<key>name<\/key>\s*<string>([^<]*)<\/string>/g)) {
+    const name = match[1]
+    const enabled = plugins.some((plugin) => plugin.ios.plugins?.some((item) => item.name === name))
+    if (!enabled) removed.push(name)
+  }
+
+  const array = fresh.length
+    ? `<array>\n${fresh.join('\n')}\n${pad}</array>`
+    : '<array/>'
+  const updated = content.slice(0, arrayStart)
+    + array
+    + content.slice(selfClosing ? arrayEnd : arrayEnd + '</array>'.length)
+
+  if (updated !== content) {
+    fs.writeFileSync(plistFile, updated)
+    console.log(`✅ updateIOSUniplugins (${label || '已清空'})`)
+    if (removed.length) {
+      console.log(chalk.yellow(`已移除未在 nativePlugins 中启用的插件注册：${removed.join(', ')}`))
+    }
+  }
+}
+
+function updateIOSNativePlugins(plistFile) {
+  const plugins = getIOSNativePlugins()
+  updateIOSCustomYml(buildIOSNativePluginYml(plugins))
+  updateIOSUniplugins(plistFile, plugins)
+  if (!plugins.length) return
+
+  const content = fs.readFileSync(plistFile, 'utf8')
+  const entries = getIOSNativePluginPlistEntries(plugins)
+  const updated = entries.length ? updatePlistRoot(content, entries) : content
+  if (updated === null) {
+    console.log(chalk.yellow('Info.plist 结构无法解析，已跳过原生插件配置写入'))
+    return
+  }
+
+  fs.writeFileSync(plistFile, updated)
+  warnEmptyIOSPluginParameters(plugins)
+  warnMissingIOSPluginPrivacies(updated, plugins)
+  console.log(`✅ updateIOSNativePlugins (${plugins.map((plugin) => plugin.id).join(', ')})`)
 }
 
 function replaceInfoPlist(plistFile) {
@@ -996,19 +1903,21 @@ function replaceInfoPlist(plistFile) {
   content = content.replace(re, '$1' + $G.manifest.uapp.appkey + '$3')
 
   // replace ios and wexin meanwhile
-  if ($G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin) {
+  // 已知空操作 (暂不处理): 模板 Info.plist 里没有 UniversalLinks / weixin / appSecret 这些键,
+  // 下面 4 条替换在现有模板上匹配不到, 等模板补齐 plist 键后再启用
+  const weixin = $G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.weixin
+  if (weixin) {
     re = /(<key>UniversalLinks<\/key>\n.+?<string>)(.*?)(<\/string>)/g
-    content = content.replace(re,
-      '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.UniversalLinks + '$3')
+    content = content.replace(re, '$1' + weixin.UniversalLinks + '$3')
 
     re = /(<key>weixin<\/key>[\s\S]+?appid<\/key>\n.+?<string>)(.*?)(<\/string>)/g
-    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
+    content = content.replace(re, '$1' + weixin.appid + '$3')
 
     re = /(<string>weixin<\/string>\n.+?<key>CFBundleURLSchemes<\/key>[\s\S]+?<string>)(.*?)(<\/string>)/g
-    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appid + '$3')
+    content = content.replace(re, '$1' + weixin.appid + '$3')
 
     re = /(<key>weixin<\/key>[\s\S]+?appSecret<\/key>\n.+<string>)(.*?)(<\/string>)/g
-    content = content.replace(re, '$1' + $G.manifest['app-plus'].distribute.sdkConfigs.oauth.weixin.appsecret + '$3')
+    content = content.replace(re, '$1' + weixin.appsecret + '$3')
   }
 
   re = /(<key>CFBundleDisplayName<\/key>\n.+?<string>)(.*?)(<\/string>)/g
@@ -1059,16 +1968,30 @@ function printManifestInfo() {
   console.log()
   console.log('- appid       : ' + $G.manifest.appid)
   console.log('- appName     : ' + $G.manifest.uapp.name)
-  console.log('- package     : ' + $G.manifest.uapp.package)
+  if ($G.projectType === 'ios') {
+    IOS_BUILD_TYPES.forEach((buildType) => {
+      const config = resolveIOSConfig(buildType)
+      const inherited = []
+      if (config.packageFromBase) inherited.push('package')
+      if (config.appkeyFromBase) inherited.push('appkey')
+      const note = inherited.length > 0 ? ` (${inherited.join(' / ')} 回退 base)` : ''
+      console.log(`- ios.${buildType.padEnd(8)}: ${config.package || '(未配置)'} / ${config.appkey || '(未配置)'}${note}`)
+    })
+  } else {
+    console.log('- package     : ' + $G.manifest.uapp.package)
+    if ($G.manifest.uapp.appkey) {
+      console.log('- appKey      : ' + $G.manifest.uapp.appkey)
+    }
+  }
   console.log('- versionName : ' + $G.manifest.uapp.versionName)
   console.log('- versionCode : ' + $G.manifest.uapp.versionCode)
-  if ($G.manifest.uapp.appkey) {
-    console.log('- appKey      : ' + $G.manifest.uapp.appkey)
-  }
 
   // for uniapp project
   console.log()
-  console.log(`👇 DCloud 开发者后台配置 dcloud_appkey (uapp.${$G.projectType}.appkey): `)
+  const appkeyKey = $G.projectType === 'ios'
+    ? `uapp.ios.${$G.args.argv.remain[2] || 'base'}.appkey`
+    : `uapp.${$G.projectType}.appkey`
+  console.log(`👇 DCloud 开发者后台配置 dcloud_appkey (${appkeyKey}): `)
   console.log('https://dev.dcloud.net.cn/pages/app/detail/info?tab=package&appid=' + $G.manifest.appid)
   console.log()
 }

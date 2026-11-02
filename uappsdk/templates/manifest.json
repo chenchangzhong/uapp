@@ -1,25 +1,55 @@
 {
   "name": "uapp",
   "appid": "__UNI__ECA8F4D",
+  "locale": "zh-Hans",
+  "fallbackLocale": "en",
   "versionName": "1.0.1",
   "versionCode": "1000000",
   "uapp": {
-    "name": "uapp",
     "package": "com.code0xff.uapp",
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
-    "ios.appkey": "aa215ff1522abe39cb7ccec5943eeb92",
+    "ios": {
+      "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
+      "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
+      "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }
+    },
     "info": "npm info uapp"
   },
   "app-plus": {
+    "screenOrientation": ["portrait-primary", "landscape-primary"],
     "distribute": {
+      "ios": {
+        "urltypes": "weixin,myapp",
+        "urlschemewhitelist": "weixin,alipay"
+      },
+      "android": {
+        "minSdkVersion": 22,
+        "targetSdkVersion": 36,
+        "permissions": [
+          "<uses-permission android:name=\"android.permission.CAMERA\"/>"
+        ],
+        "excludePermissions": [
+          "<uses-permission android:name=\"android.permission.READ_PHONE_STATE\"/>"
+        ],
+        "schemes": "myapp"
+      },
       "sdkConfigs": {
         "oauth": {
           "weixin": {
             "appid": "wx95039516c9f72e50",
             "appsecret": "123456",
             "UniversalLinks": "https://uapp.code0xff.com/"
+          },
+          "google": {
+            "clientid": "123-abc.apps.googleusercontent.com"
           }
         }
+      }
+    },
+    "nativePlugins": {
+      "TestPlugin": {
+        "appkey": "插件 appkey",
+        "env": "prod"
       }
     }
   }

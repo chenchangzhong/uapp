@@ -138,10 +138,15 @@ uapp new YourProject
   // ...
   "versionCode": "100",
   "uapp": {
-    "name": "uapp",
     "package": "com.code0xff.uapp",
     "android.appkey": "申请并替换为 android dcloudkey",
-    "ios.appkey": "申请并替换为 ios dcloudkey"
+    "ios": {
+      // base / release 必填; test / sim 未填的字段回退 base
+      "base": { "package": "com.code0xff.uapp", "appkey": "base 的 dcloudkey" },
+      // test / sim 可只填部分字段, 也可整个节点省略 (全部回退 base)
+      "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
+      "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }
+    }
   },
   // ...
 }
@@ -243,6 +248,9 @@ uapp run build:app-plus
 uapp run custom
 ```
 
+> 👉 iOS 工程上 `uapp prepare` 不知道要打哪种包，只更新版本号 / 图标 / 资源，不写包名和 appkey；
+> 包名与 appkey 在 `uapp run build:app base|test|sim|release` 时按构建类型写入。
+
 ### Android 多渠道打包
 
 支持 origin(默认), huawei, honor, xiaomi, vivo, oppo, meizu 渠道，格式为 `apk:渠道` 或 `dev:渠道`。
@@ -299,10 +307,13 @@ uapp run build:app release
   "versionName": "1.0.1",
   "versionCode": "1000000",
   "uapp": {
-    "name": "uapp",
     "package": "com.code0xff.uapp",
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
-    "ios.appkey": "aa215ff1522abe39cb7ccec5943eeb92",
+    "ios": {
+      "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
+      "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
+      "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }
+    },
     "custom.command": "cd ${SRC}/../android && uapp run build:app && node publish_apk.js"
   },
   "app-plus": {
@@ -326,9 +337,14 @@ uapp run build:app release
 👉 不同平台可以用前缀区分
 
 <blockquote>
-name, package, versionName, versionCode 如果需要平台差异化定义, 可以加前缀 android.*, ios.*
+versionName, versionCode 如果需要平台差异化定义, 可以加前缀 android.*, ios.*
 
-例如 android.name, android.package, ios.package, ios.versionCode ...
+例如 android.versionName, android.versionCode, ios.versionName, ios.versionCode ...
+
+应用名统一取根节点的 name, `uapp.name` / `uapp.<platform>.name` 已废弃（不再读取）.
+
+iOS 的 package / appkey 按构建类型写在 `uapp.ios.{base|test|sim|release}` 里:
+base / release 必填, test / sim 未填的字段回退 base（旧的 `ios.package` / `ios.appkey` 已废弃）.
 
 custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json 的同级目录，支持加 ../定位上一级目录，避免用绝对路径。
 </blockquote>
@@ -337,13 +353,142 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 
 | uapp.* 参数      | 说明                                                                                     |
 |:---------------|----------------------------------------------------------------------------------------|
-| name           | APP名字，不填写默认使用根节点的name。不同平台可以加前缀区分，如 android.name                                       |
-| package        | 应用的包名。不同平台可以加前缀区分，如 ios.package                                                        |
+| name           | 已废弃, 不再读取。APP名字统一取根节点的 name（根 name 必填, 缺失时打包报错）                          |
+| package        | 应用的包名（Android 使用）。不同平台可以加前缀区分，如 android.package。iOS 见 uapp.ios.*                                 |
 | android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey，下方有申请地址                                           |
-| ios.appkey     | DCloud平台申请的，iOS 平台 dcloud_appkey，下方有申请地址                                               |
+| ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey }`。base / release 必填；test / sim 未填的字段回退 base |
 | versionName    | App版本名，同上可以加前缀区分不同平台。如 android.versionName                                             |
 | versionCode    | App版本Code，同上可以加前缀区分不同平台。如 ios.versionCode                                              |
 | custom.command | (选填) uapp run custom 执行的自定义命令。比如一条命令里做很多事: `uapp run build:app && node publish_apk.js` |
+
+### 🔒 iOS 权限文案（privacyDescription）
+
+本地打包和云端打包不同，`Info.plist` 来自模板工程，所以 uapp 会读取 `app-plus.distribute.ios.privacyDescription` 自己同步：
+
+```json5
+{
+  "app-plus": {
+    "distribute": {
+      "ios": {
+        "privacyDescription": {
+          // 键名就是 Info.plist 的键名
+          "NSCameraUsageDescription": "需要使用相机拍摄照片用于设置头像",
+          "NSPhotoLibraryUsageDescription": "需要访问相册，以便上传您选择的图片"
+        }
+      }
+    }
+  }
+}
+```
+
+- 已有键覆盖，模板里没有的键会自动插入（相机、相册、定位、通讯录等模板都没预置）
+- 只写入本次构建类型对应的 Info.plist：base/test/sim → `AppDev/Info.plist`，release → `AppRelease/Info.plist`
+- 值不做国际化展开，`%app.ios.des.camera%` 这类占位符会原样写入
+
+### 🔗 iOS URL Scheme 与白名单
+
+同样来自 manifest 的标准字段，uapp 会写进本次构建类型的 `Info.plist`：
+
+```json5
+{
+  "app-plus": {
+    "distribute": {
+      "ios": {
+        "urltypes": "weixin,myapp",              // 逗号分隔，写入 CFBundleURLName=scheme 那条的 CFBundleURLSchemes
+        "urlschemewhitelist": "weixin,alipay"    // 逗号分隔，写入 LSApplicationQueriesSchemes
+      },
+      "sdkConfigs": {
+        "oauth": {
+          "google": { "clientid": "123-abc.apps.googleusercontent.com" }
+        }
+      }
+    }
+  }
+}
+```
+
+- `google.clientid` 会写两处：`GIDClientID` 用原值，`CFBundleURLName=google_url` 那条的
+  scheme 用**倒序**（`123-abc.apps.googleusercontent.com` → `com.googleusercontent.apps.123-abc`）
+- 数组和逗号分隔字符串都支持
+
+### 🌐 iOS 多语言（locale / fallbackLocale）
+
+写到 `Info.plist` 的 `CFBundleLocalizations`：
+
+```json
+{ "locale": "ko", "fallbackLocale": "zh-Hant" }
+```
+
+- 语言列表 = 根节点 `locale` → `fallbackLocale` → `locale/*.json` 里的语言文件（`uni-app.ko.json` 会归一成 `ko`），去重排序
+- **不写这个键，iOS 只认 `CFBundleDevelopmentRegion`**，`uni.getSystemInfoSync().language` 永远是开发语言，应用内多语言不会跟随系统切换
+- `CFBundleDevelopmentRegion`（系统语言不在支持列表时的兜底）跟随 `fallbackLocale`，保证它始终是 `CFBundleLocalizations` 里的一种；没配 `fallbackLocale` 就不动
+- 没配置的字段保持模板原值（模板里的 `fashionkujihk`、`line` 不会被清空）
+- 模板里没有 `CFBundleURLTypes` / `LSApplicationQueriesSchemes` / `GIDClientID` 时会自动补齐
+
+### 📱 iOS 屏幕方向（screenOrientation）
+
+`app-plus.screenOrientation` 会写进本次构建类型 `Info.plist` 的 `UISupportedInterfaceOrientations` 与 `UISupportedInterfaceOrientations~ipad`：
+
+```json
+{ "app-plus": { "screenOrientation": ["portrait-primary", "landscape-primary"] } }
+```
+
+- 映射：`portrait-primary` → `Portrait`，`portrait-secondary` → `PortraitUpsideDown`，`landscape-primary` → `LandscapeLeft`，`landscape-secondary` → `LandscapeRight`
+- 数组和逗号分隔字符串都支持
+- 不配（或全是识别不了的值）时保持模板原值（模板是四个方向全开），只支持竖屏的项目一定要配，否则离线包仍然是四方向
+
+### 🧩 iOS 原生插件（nativePlugins）
+
+离线打包时，uapp 会按 manifest 里启用的原生插件同步插件配置：
+
+```json5
+{
+  "app-plus": {
+    "nativePlugins": {
+      "TestPlugin": { "appkey": "abc123", "env": "prod" }   // 插件标识 → 插件参数
+    }
+  }
+}
+```
+
+- 插件目录：`nativeplugins/<插件标识>/`，读取其 `package.json` 里的 `_dp_nativeplugin.ios`
+- `dcloud_uniplugins` 是离线打包的插件注册表，**必须和 manifest 一致**，否则插件等于没引用；CLI 用 `hooksClass` + `plugins[{type,name,class}]` 整段重写该数组，旧的手写/过期注册会被移除并提示
+- `plists` / `capabilities.plists` 合并进本次构建类型的 `Info.plist`（`plists` 优先，嵌套 object 逐层写入，不覆盖同 dict 下已有键）
+- `parameters` 按 `<参数名>` 从 `nativePlugins.<插件标识>` 取值，`key` 用 `:` 分层写入 `Info.plist`，`value` 里的 `${参数名}` 会被替换；参数定义优先用插件 `package.json` 的 `_dp_nativeplugin.ios.parameters`，没声明时回退 manifest 里 HBuilderX 记录的 `__plugin_info__.parameters`（按 `platforms` 过滤掉非 iOS 插件）
+- 声明的参数键**一定会写进 Info.plist**（值是空也写成 `<string></string>`），因为很多 SDK 靠键是否存在判断是否集成；值为空时会打印告警，提示该插件等同未生效
+- `frameworks` 里的系统库（`UIKit.framework`、`libz.tbd` 等）写成 `- sdk:`，插件目录里的第三方库写成 `- framework:`；`embedFrameworks` 里的会 `embed` + `codeSign`
+- 插件 `ios` 根目录下的 `.a` / `.framework` / `.xcframework` 自动加入（与云打包一致）
+- `resources` / `assets` 写成 `buildPhase: resources`，无扩展名的目录补 `type: folder`
+- 以上依赖写进 `config/custom.yml` 的 `targetTemplates.uAppBase`，用 `# >>> uapp nativeplugins` 标记块管理，每次构建整块重写；插件全关掉会还原成 `uAppBase: {}`
+- `privacies` 声明的隐私键若在最终 `Info.plist` 里缺失，会提示到 `app-plus.distribute.ios.privacyDescription` 补齐
+- `base.yml` 里已有的系统库不会重复写入（重复依赖会让 xcodegen 丢掉其他 framework 依赖）
+- 暂不支持：`capabilities.entitlements`、`deploymentTarget`、`validArchitectures`
+
+### 🤖 Android 工程配置（SDK 版本 / 权限 / scheme）
+
+本地打包的 `app/build.gradle` 与 `AndroidManifest.xml` 来自模板工程，uapp 会按 manifest 同步：
+
+```json5
+{
+  "app-plus": {
+    "distribute": {
+      "android": {
+        "minSdkVersion": 22,
+        "targetSdkVersion": 36,
+        "permissions": ["<uses-permission android:name=\"android.permission.CAMERA\"/>"],
+        "excludePermissions": ["<uses-permission android:name=\"android.permission.READ_PHONE_STATE\"/>"],
+        "schemes": "myapp"                       // 逗号分隔支持多个
+      }
+    }
+  }
+}
+```
+
+- `minSdkVersion` / `targetSdkVersion` 写入 `app/build.gradle` 的 `minSdk` / `targetSdk`（也兼容 `minSdkVersion` 写法）
+- `permissions` **只增不删**：工程里手工加的权限保留，已经存在的不重复写入
+- `excludePermissions` 写成 `tools:node="remove"`，避免被依赖库的 manifest 合并回来；已在工程里的普通声明会被改写成 remove
+- `schemes` 写到每个带 `VIEW` intent-filter 的 activity（`PandoraEntry`、`PandoraEntryActivity`），已存在的 scheme 不重复写
+- 没配的字段不动工程文件；`android.abiFilters`、`android.manifest` 暂不支持
 
 ## 五、其他参考
 
