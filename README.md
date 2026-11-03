@@ -281,7 +281,7 @@ uapp run build:app apk:huawei upload
 # 编译真机自定义基座
 uapp run build:app base
 
-# 编译测试包 (使用 export_test.plist)
+# 编译测试包 (默认共用 export_dev.plist; export=own 时用 export_test.plist)
 uapp run build:app test
 
 # 编译 iOS 模拟器包 (x86_64, iPhone 17 Simulator)
@@ -290,7 +290,7 @@ uapp run build:app sim
 # 编译测试包并上传蒲公英
 uapp run build:app test upload
 
-# 编译 release 发布包 (使用 export_release.plist, 需自行创建并按项目签名配置)
+# 编译 release 发布包 (使用 export_release.plist, 签名改 uapp_release.yml)
 uapp run build:app release
 ```
 
@@ -346,6 +346,11 @@ versionName, versionCode 如果需要平台差异化定义, 可以加前缀 andr
 iOS 的 package / appkey 按构建类型写在 `uapp.ios.{base|test|sim|release}` 里:
 base / release 必填, test / sim 未填的字段回退 base（旧的 `ios.package` / `ios.appkey` 已废弃）.
 
+test 包的导出配置跟随 `uapp.ios.test.export`: `dev`（默认，共用 `config/export_dev.plist`，
+开发签名打调试包）、`release`（共用 `config/export_release.plist`，与正式包同一种导出方式）
+或 `own`（用工程里自己的 `config/export_test.plist`，适合测试包 ad-hoc + 正式包 App Store 这类
+method 不同的场景）。
+
 custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json 的同级目录，支持加 ../定位上一级目录，避免用绝对路径。
 </blockquote>
 
@@ -356,7 +361,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 | name           | 已废弃, 不再读取。APP名字统一取根节点的 name（根 name 必填, 缺失时打包报错）                          |
 | package        | 应用的包名（Android 使用）。不同平台可以加前缀区分，如 android.package。iOS 见 uapp.ios.*                                 |
 | android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey，下方有申请地址                                           |
-| ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey }`。base / release 必填；test / sim 未填的字段回退 base |
+| ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey }`。base / release 必填；test / sim 未填的字段回退 base。`ios.test.export` 可选 `dev`(默认) / `release` / `own`，决定测试包用哪份导出配置 |
 | versionName    | App版本名，同上可以加前缀区分不同平台。如 android.versionName                                             |
 | versionCode    | App版本Code，同上可以加前缀区分不同平台。如 ios.versionCode                                              |
 | custom.command | (选填) uapp run custom 执行的自定义命令。比如一条命令里做很多事: `uapp run build:app && node publish_apk.js` |

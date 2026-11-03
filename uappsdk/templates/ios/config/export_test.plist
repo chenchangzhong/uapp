@@ -6,16 +6,20 @@
 	<false/>
 	<key>destination</key>
 	<string>export</string>
+	<!-- 仅 uapp.ios.test.export=own 时使用本文件; 与正式包 method 不同 (如 ad-hoc
+	     分发) 就把这里改成 ad-hoc, 与 export_release.plist 互不影响 -->
 	<key>method</key>
 	<string>debugging</string>
 	<key>signingStyle</key>
 	<string>manual</string>
-	<!-- 按项目实际开发签名修改 -->
+	<!-- teamID / signingCertificate / provisioningProfiles 由 prepare 从
+	     config/uapp_test.yml 的 DEVELOPMENT_TEAM / CODE_SIGN_IDENTITY /
+	     PROVISIONING_PROFILE_SPECIFIER 同步, 不用手改 -->
 	<key>signingCertificate</key>
 	<string>Apple Development</string>
 	<key>provisioningProfiles</key>
 	<dict>
-		<!-- key = PRODUCT_BUNDLE_IDENTIFIER, value = profile 的 Name -->
+		<!-- key = PRODUCT_BUNDLE_IDENTIFIER, value = profile 的 Name (均由 prepare 写入) -->
 		<key>com.example.uapp</key>
 		<string>uapp-dev</string>
 	</dict>

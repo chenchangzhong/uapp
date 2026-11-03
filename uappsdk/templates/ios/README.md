@@ -22,8 +22,7 @@ uapp add ios         # 在 webapp 根目录执行, 生成本地模板工程
 | `config/base.yml` | 一般不用改（prepare 会从 manifest 同步版本号/应用名） |
 | `config/uapp_dev.yml` / `uapp_test.yml` | `DEVELOPMENT_TEAM`、`PROVISIONING_PROFILE_SPECIFIER`（`PRODUCT_BUNDLE_IDENTIFIER` 由 prepare 从 manifest 写入，不用改） |
 | `config/uapp_release.yml` | `DEVELOPMENT_TEAM`、`PROVISIONING_PROFILE_SPECIFIER` |
-| `config/export_test.plist` | `teamID`、provisioningProfiles 的 profile 名（bundle id 由 prepare 写入） |
-| `config/export_release.plist` | `teamID`、provisioningProfiles 的 profile 名、`method` |
+| `config/export_dev.plist` / `export_release.plist` / `export_test.plist` | 按需改 `method`（App Store / ad-hoc / enterprise）。`teamID`、`signingCertificate`、provisioningProfiles 的包名与 profile 名均由 prepare 从对应 `uapp_*.yml` 同步，**不用手改**。`export_test.plist` 只在 `uapp.ios.test.export=own` 时使用 |
 
 profile 提前装好：p12 导入钥匙串 + `.mobileprovision` 拷到
 `~/Library/MobileDevice/Provisioning Profiles/`。
@@ -32,7 +31,7 @@ profile 提前装好：p12 导入钥匙串 + `.mobileprovision` 拷到
 
 ```bash
 uapp run build:app-plus base      # 真机自定义基座 (HBuilderX 运行到 iOS 真机)
-uapp run build:app-plus test      # 测试包 (export_test.plist)
+uapp run build:app-plus test      # 测试包 (默认共用 export_dev.plist)
 uapp run build:app-plus sim       # iOS 模拟器包 (x86_64)
 uapp run build:app-plus release   # release 发布包 (export_release.plist)
 ```
@@ -47,6 +46,13 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
   `provisioningProfiles` key 同步写成该包名；release 包名必须与 DCloud key
   申请时的包名一致，否则 appkey 校验失败
 - test / sim 未填的字段回退 `uapp.ios.base`，base / release 必填
+- test 的导出配置由 `uapp.ios.test.export` 决定，签名值始终取自 `uapp_test.yml`：
+  - `dev`（默认）：与 base 同为开发签名，共用 `config/export_dev.plist`
+  - `release`：与正式包同一种导出方式，共用 `config/export_release.plist`
+  - `own`：用本工程的 `config/export_test.plist`。测试包要 ad-hoc、正式包要
+    App Store 时两者的 `method` 不同，只能走这个值（把 `export_test.plist` 的
+    `method` 改成 `ad-hoc`）；文件不存在时 prepare 会报错提示从 `export_dev.plist`
+    复制一份
 - 旧的 `uapp["ios.package"]` / `uapp["ios.appkey"]` 已废弃，不再读取
 - iOS 权限文案由 `app-plus.distribute.ios.privacyDescription` 同步：键名即 Info.plist
   键名（如 `NSCameraUsageDescription`），打包时写入本次构建类型的 Info.plist

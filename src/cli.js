@@ -263,7 +263,10 @@ export default function (inputArgs) {
       console.log(chalk.green('--- iOS 工程已创建 (本地模板) ---'))
       console.log('下一步:')
       console.log('1. 根 manifest.json 的 uapp.ios 节点填 base / test / sim / release 四套 package + appkey')
-      console.log('2. 按签名信息修改 ios/config/*.yml 的 PROVISIONING_PROFILE_SPECIFIER 和 export_*.plist (占位符见 ios/README.md)')
+      console.log('2. 按签名信息修改 ios/config/*.yml 的 DEVELOPMENT_TEAM / PROVISIONING_PROFILE_SPECIFIER')
+      console.log('   export_*.plist 的 teamID / 签名证书 / profile 名由 prepare 从对应 yml 同步，只需按需改 method')
+      console.log('   测试包默认共用 export_dev.plist，要跟正式包同一种导出方式就设 uapp.ios.test.export=release，')
+      console.log('   要和正式包的 method 不同 (如测试包 ad-hoc) 就设 own 并改 config/export_test.plist 的 method')
       console.log('3. cd ios && xcodegen generate')
       console.log('4. 打包: uapp run build:app-plus base|test|sim|release')
       return
@@ -557,7 +560,7 @@ export default function (inputArgs) {
 
           // generate ipa
           execSync(
-            `xcodebuild -exportArchive -archivePath out/${name}_test.xcarchive -exportPath out -exportOptionsPlist config/export_test.plist`,
+            `xcodebuild -exportArchive -archivePath out/${name}_test.xcarchive -exportPath out -exportOptionsPlist config/${resolveIOSExportPlist('test')}`,
             { stdio: 'inherit' }
           )
 
@@ -1092,12 +1095,40 @@ function getIconResourceDir(resDir) {
 
 const IOS_BUILD_TYPES = ['base', 'test', 'sim', 'release']
 
-// 每个构建类型写入的工程文件 (sim 与 base 共用 yml 和 Info.plist, test 只共用 Info.plist)
+// 每个构建类型写入的工程文件 (sim 与 base 共用 yml 和 Info.plist; test 的导出配置
+// 由 uapp.ios.test.export 决定, 见 resolveIOSExportPlist)
 const IOS_TARGET_FILES = {
   base: { yml: 'uapp_dev.yml', infoPlist: 'AppDev/Info.plist', exportPlist: 'export_dev.plist' },
   sim: { yml: 'uapp_dev.yml', infoPlist: 'AppDev/Info.plist' },
-  test: { yml: 'uapp_test.yml', infoPlist: 'AppDev/Info.plist', exportPlist: 'export_test.plist' },
+  test: { yml: 'uapp_test.yml', infoPlist: 'AppDev/Info.plist' },
   release: { yml: 'uapp_release.yml', infoPlist: 'AppRelease/Info.plist', exportPlist: 'export_release.plist' }
+}
+
+// test 的导出配置由 uapp.ios.test.export 决定:
+//   dev (默认) 共用 export_dev.plist, 与 base 同一种导出方式 (调试包)
+//   release    共用 export_release.plist, 与正式包同一种导出方式 (TestFlight / ad-hoc)
+//   own        用 config/export_test.plist, method 与正式包不同时用
+//              (如测试包 ad-hoc + 正式包 App Store)
+// 签名值始终取自 uapp_test.yml, plist 里只有 method 等导出阶段配置需要人改
+function resolveIOSExportPlist(buildType) {
+  const files = IOS_TARGET_FILES[buildType]
+  if (!files) return ''
+  if (buildType !== 'test') return files.exportPlist || ''
+
+  const follow = String($G.manifest.uapp?.ios?.test?.export || 'dev').trim()
+  if (follow === 'dev') return 'export_dev.plist'
+  if (follow === 'release') return 'export_release.plist'
+  if (follow === 'own') {
+    // own 要求工程里有 export_test.plist, 旧工程缺文件时不会自动补
+    if (!fs.existsSync(path.join($G.appDir, 'config', 'export_test.plist'))) {
+      console.log(chalk.red('uapp.ios.test.export=own 需要 config/export_test.plist，可从 export_dev.plist 复制后改 method'))
+      process.exit(1)
+    }
+    return 'export_test.plist'
+  }
+
+  console.log(chalk.red(`uapp.ios.test.export 只能是 dev / release / own，当前: ${follow}`))
+  process.exit(1)
 }
 
 // uapp.ios.{base|test|sim|release} 的 package/appkey; test/sim 未填的字段回退 base
@@ -1155,7 +1186,14 @@ function updateIOSMetaData() {
     $G.manifest.uapp.package = config.package
     $G.manifest.uapp.appkey = config.appkey
     updateIOSBundleId(targetFiles.yml, config.package)
-    updateIOSExportProfile(targetFiles.exportPlist, config.package)
+    // 签名信息以 target yml 为准, 导出 plist 只保留 method 等导出阶段专属配置
+    const exportPlist = resolveIOSExportPlist(rawBuildType)
+    const signing = readIOSSigningSettings(targetFiles.yml)
+    const method = updateIOSExportProfile(exportPlist, config.package, signing)
+    // debugging 以外的导出方式 (app-store-connect / ad-hoc / enterprise) 都要发布证书
+    if (method && method !== 'debugging' && signing.signingCertificate && !/distribution/i.test(signing.signingCertificate)) {
+      console.log(chalk.yellow(`${exportPlist} 的 method 是 ${method}, 但 ${targetFiles.yml} 的 CODE_SIGN_IDENTITY 是 ${signing.signingCertificate}, 需要发布证书才能导出`))
+    }
   } else {
     console.log(chalk.yellow('未指定 iOS 构建类型，跳过包名 / appkey 写入'))
     console.log('打包请用 uapp run build:app-plus base|test|sim|release')
@@ -1217,22 +1255,64 @@ function updateIOSBundleId(ymlName, bundleId) {
   fs.writeFileSync(ymlFile, content)
 }
 
-function updateIOSExportProfile(exportPlistName, bundleId) {
+// target yml 是签名信息的唯一来源; 导出 plist 的 teamID / signingCertificate /
+// provisioningProfiles 由这里同步, 用户只需改 yml (method 仍只属于导出阶段)
+function readIOSSigningSettings(ymlName) {
+  const content = fs.readFileSync(path.join($G.appDir, 'config', ymlName), 'utf8')
+  const read = (key) => {
+    const match = new RegExp(`^[ \t]*${key}:[ \t]*(.+)$`, 'm').exec(content)
+    return match ? parseYamlScalar(match[1]) : ''
+  }
+  return {
+    teamID: read('DEVELOPMENT_TEAM'),
+    signingCertificate: read('CODE_SIGN_IDENTITY'),
+    profile: read('PROVISIONING_PROFILE_SPECIFIER')
+  }
+}
+
+// 去引号 / 去行尾注释, 够用即可 (签名信息都是单行标量)
+function parseYamlScalar(raw) {
+  const value = String(raw).trim()
+  const quote = value[0]
+  if (quote === '"' || quote === "'") {
+    const end = value.indexOf(quote, 1)
+    return end > 0 ? value.slice(1, end) : value.slice(1)
+  }
+  return value.replace(/[ \t]+#.*$/, '')
+}
+
+function updateIOSExportProfile(exportPlistName, bundleId, signing) {
   // sim 没有导出配置
-  if (!exportPlistName) return
+  if (!exportPlistName) return ''
   let plistFile = path.join($G.appDir, 'config', exportPlistName)
-  // 缺 export_release.plist 由构建阶段报错
-  if (!fs.existsSync(plistFile)) return
+  // 缺对应 plist 时由构建阶段报错 (own 已在 resolveIOSExportPlist 里拦过)
+  if (!fs.existsSync(plistFile)) return ''
 
   let content = fs.readFileSync(plistFile, 'utf8')
-  const re = /(<key>provisioningProfiles<\/key>\s*<dict>[\s\S]*?<key>)([^<]+)(<\/key>)/
+  const re = /(<key>provisioningProfiles<\/key>[\s\S]*?<key>)([^<]+)(<\/key>\s*<string>)([^<]*)(<\/string>)/
   if (!re.test(content)) {
-    console.log(chalk.red(`${exportPlistName} 的 provisioningProfiles 缺少 bundle id 条目，无法写入包名`))
+    console.log(chalk.red(`${exportPlistName} 的 provisioningProfiles 缺少 bundle id 条目，无法写入包名与签名信息`))
     process.exit(1)
   }
 
-  content = content.replace(re, (match, head, oldBundleId, tail) => head + bundleId + tail)
+  content = content.replace(
+    re,
+    (match, head, oldBundleId, mid, oldProfile, tail) =>
+      head + bundleId + mid + (signing.profile || oldProfile) + tail
+  )
+  content = replacePlistStringValue(content, 'teamID', signing.teamID)
+  content = replacePlistStringValue(content, 'signingCertificate', signing.signingCertificate)
   fs.writeFileSync(plistFile, content)
+
+  const method = /<key>method<\/key>\s*<string>([^<]*)<\/string>/.exec(content)
+  return method ? method[1] : ''
+}
+
+// 键存在才覆盖; 缺键说明模板被改过, 保留原样
+function replacePlistStringValue(content, key, value) {
+  if (!value) return content
+  const re = new RegExp(`(<key>${escapeRe(key)}</key>\\s*<string>)[\\s\\S]*?(</string>)`)
+  return content.replace(re, (match, head, tail) => head + escapePlistValue(value) + tail)
 }
 
 function escapePlistValue(value) {
