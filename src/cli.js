@@ -2013,13 +2013,21 @@ function replaceControlXml(xmlFile) {
   let innerSDKVersion = '1.0.0'
   if (fs.existsSync(sdkControlFile)) {
     let content = fs.readFileSync(sdkControlFile, 'utf8')
-    innerSDKVersion = content.match(/<HBuilder.+version="(.*)"/)[1] || innerSDKVersion
+    // SDK 里是 <HBuilder version="...">，工程模板里是小写 <hbuilder version="...">，
+    // 老的 /<HBuilder.+version="(.*)"/ 只能匹配前者，模板里的 version 因此从没被改写过
+    let match = content.match(/<hbuilder[^>]*\bversion="([^"]*)"/i)
+    if (match) innerSDKVersion = match[1] || innerSDKVersion
   }
 
   let content = fs.readFileSync(xmlFile, 'utf8')
   let re = /(app appid=")(.+?)(")/g
   content = content.replace(re, '$1' + $G.manifest.appid + '$3')
-  content = content.replace(/(<HBuilder.+version=")(.*)(")/, '$1' + innerSDKVersion + '$3')
+  content = content.replace(/(<hbuilder[^>]*\bversion=")([^"]*)(")/i, '$1' + innerSDKVersion + '$3')
+  // appver 是内置资源版本，跟 manifest.json 的 versionName 保持同步，不再手改
+  let appver = normalizeVersionName($G.manifest.uapp.versionName)
+  if (appver) {
+    content = content.replace(/(\bappver=")([^"]*)(")/g, '$1' + appver + '$3')
+  }
 
   fs.writeFileSync(xmlFile, content)
 }
