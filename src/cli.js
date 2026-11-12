@@ -1131,7 +1131,9 @@ function resolveIOSExportPlist(buildType) {
   process.exit(1)
 }
 
-// uapp.ios.{base|test|sim|release} 的 package/appkey; test/sim 未填的字段回退 base
+// uapp.ios.{base|test|sim|release} 的 package/appkey; test/sim 未填的字段回退 base。
+// google client id 绑定 bundle id: 正式包沿用 manifest 标准字段, 测试包包名不同,
+// 在 uapp.ios.test.googleClientId 里单独写; 未填时回退 uapp.ios.base.googleClientId -> 标准字段
 function resolveIOSConfig(buildType) {
   const ios = $G.manifest.uapp.ios || {}
   const base = ios.base || {}
@@ -1142,12 +1144,21 @@ function resolveIOSConfig(buildType) {
   const ownAppkey = read(own, 'appkey')
   const basePackage = inheritsBase ? read(base, 'package') : ''
   const baseAppkey = inheritsBase ? read(base, 'appkey') : ''
+  const ownGoogle = read(own, 'googleClientId')
+  const baseGoogle = inheritsBase ? read(base, 'googleClientId') : ''
+  const manifestGoogle = String($G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.google?.clientid || '').trim()
 
   return {
     package: ownPackage || basePackage,
     appkey: ownAppkey || baseAppkey,
     packageFromBase: !ownPackage && !!basePackage,
-    appkeyFromBase: !ownAppkey && !!baseAppkey
+    appkeyFromBase: !ownAppkey && !!baseAppkey,
+    googleClientId: ownGoogle || baseGoogle || manifestGoogle,
+    googleSource: ownGoogle
+      ? `uapp.ios.${buildType}.googleClientId`
+      : baseGoogle
+        ? 'uapp.ios.base.googleClientId'
+        : manifestGoogle ? 'sdkConfigs.oauth.google.clientid' : ''
   }
 }
 
@@ -1207,7 +1218,7 @@ function updateIOSMetaData() {
     updateIOSPrivacyDescription(infoPlistFile)
     updateIOSLocalizations(infoPlistFile)
     updateIOSScreenOrientation(infoPlistFile)
-    updateIOSUrlSchemes(infoPlistFile)
+    updateIOSUrlSchemes(infoPlistFile, config.googleClientId, config.googleSource)
     updateIOSNativePlugins(infoPlistFile)
   }
 
@@ -1424,12 +1435,12 @@ function upsertPlistString(content, key, value) {
 
 // manifest 标准字段: ios.urltypes -> CFBundleURLName=scheme 的 schemes,
 // ios.urlschemewhitelist -> LSApplicationQueriesSchemes,
-// sdkConfigs.oauth.google.clientid -> GIDClientID 原值 + google_url 用倒序
-function updateIOSUrlSchemes(plistFile) {
+// google client id -> GIDClientID 原值 + google_url 用倒序。
+// client id 由 resolveIOSConfig 按构建类型解析 (正式包用标准字段, 测试包可用 uapp.ios.test.googleClientId)
+function updateIOSUrlSchemes(plistFile, googleClientId, googleSource) {
   const ios = $G.manifest['app-plus']?.distribute?.ios
   const urltypes = toValueList(ios?.urltypes)
   const urlSchemeWhitelist = toValueList(ios?.urlschemewhitelist)
-  const googleClientId = String($G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.google?.clientid || '').trim()
   if (!urltypes.length && !urlSchemeWhitelist.length && !googleClientId) return
 
   let content = fs.readFileSync(plistFile, 'utf8')
@@ -1450,7 +1461,7 @@ function updateIOSUrlSchemes(plistFile) {
   }
 
   fs.writeFileSync(plistFile, content)
-  console.log(`✅ updateIOSUrlSchemes (scheme: ${urltypes.length}, queries: ${urlSchemeWhitelist.length}, google: ${googleClientId ? 'yes' : 'no'})`)
+  console.log(`✅ updateIOSUrlSchemes (scheme: ${urltypes.length}, queries: ${urlSchemeWhitelist.length}, google: ${googleClientId ? googleSource : 'no'})`)
 }
 
 // manifest 根节点的 locale / fallbackLocale 决定 iOS 的本地化列表, 只认 manifest,

@@ -10,7 +10,7 @@
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
     "ios": {
       "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
-      "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
+      "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey", "googleClientId": "test 包的 google client id" },
       "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }
     },
     "info": "npm info uapp"

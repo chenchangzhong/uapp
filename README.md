@@ -345,6 +345,8 @@ versionName, versionCode 如果需要平台差异化定义, 可以加前缀 andr
 
 iOS 的 package / appkey 按构建类型写在 `uapp.ios.{base|test|sim|release}` 里:
 base / release 必填, test / sim 未填的字段回退 base（旧的 `ios.package` / `ios.appkey` 已废弃）.
+Google 登录的 iOS client id 也可以写在同一节点: 正式包不用填（沿用标准字段）,
+测试包写 `uapp.ios.test.googleClientId`.
 
 test 包的导出配置跟随 `uapp.ios.test.export`: `dev`（默认，共用 `config/export_dev.plist`，
 开发签名打调试包）、`release`（共用 `config/export_release.plist`，与正式包同一种导出方式）
@@ -361,7 +363,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 | name           | 已废弃, 不再读取。APP名字统一取根节点的 name（根 name 必填, 缺失时打包报错）                          |
 | package        | 应用的包名（Android 使用）。不同平台可以加前缀区分，如 android.package。iOS 见 uapp.ios.*                                 |
 | android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey，下方有申请地址                                           |
-| ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey }`。base / release 必填；test / sim 未填的字段回退 base。`ios.test.export` 可选 `dev`(默认) / `release` / `own`，决定测试包用哪份导出配置 |
+| ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey, googleClientId }`。base / release 必填；test / sim 未填的字段回退 base。`googleClientId` 是 Google 登录的 iOS client id（正式包不填，沿用 `app-plus.distribute.sdkConfigs.oauth.google.clientid`）。`ios.test.export` 可选 `dev`(默认) / `release` / `own`，决定测试包用哪份导出配置 |
 | versionName    | App版本名，同上可以加前缀区分不同平台。如 android.versionName                                             |
 | versionCode    | App版本Code，同上可以加前缀区分不同平台。如 ios.versionCode                                              |
 | custom.command | (选填) uapp run custom 执行的自定义命令。比如一条命令里做很多事: `uapp run build:app && node publish_apk.js` |
@@ -414,6 +416,12 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 
 - `google.clientid` 会写两处：`GIDClientID` 用原值，`CFBundleURLName=google_url` 那条的
   scheme 用**倒序**（`123-abc.apps.googleusercontent.com` → `com.googleusercontent.apps.123-abc`）
+- Google 的 iOS client id 绑定 bundle id，正式版和测试版包名不同就得各申请一个：
+  正式包（base / release）不用填，沿用 `sdkConfigs.oauth.google.clientid`；测试版写在
+  `uapp.ios.test.googleClientId`，按构建类型写进对应的 `Info.plist`
+- `AppDev/Info.plist` 被 base / test / sim 三个 target 共用，切换构建类型后要重跑
+  `uapp run build:app-plus <type>` 才会覆盖成该构建类型的 client id（release 用独立的
+  `AppRelease/Info.plist`，没有这个问题）
 - 数组和逗号分隔字符串都支持
 
 ### 🌐 iOS 多语言（locale / fallbackLocale）

@@ -61,7 +61,8 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
 - URL Scheme / 白名单 / Google 登录也按标准字段同步：`ios.urltypes` →
   `CFBundleURLName=scheme` 的 schemes、`ios.urlschemewhitelist` →
   `LSApplicationQueriesSchemes`、`sdkConfigs.oauth.google.clientid` → `GIDClientID`（原值）
-  + `google_url`（倒序）；没配置时保留模板原值，模板缺键会自动补齐
+  + `google_url`（倒序）；测试包可在 `uapp.ios.test.googleClientId` 单独配一个 client id
+  （Google 的 iOS client id 绑定 bundle id，正式包沿用标准字段）；没配置时保留模板原值，模板缺键会自动补齐
 - 多语言：manifest 根节点 `locale` / `fallbackLocale` 写入 `CFBundleLocalizations`（只认 manifest，不扫描 `locale/` 目录），
   否则 iOS 只认 `CFBundleDevelopmentRegion`，应用内语言不跟随系统；`CFBundleDevelopmentRegion`
   跟随 `fallbackLocale`（兜底语言必须是支持列表里的一种）
