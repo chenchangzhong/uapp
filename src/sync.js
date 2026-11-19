@@ -18,7 +18,8 @@ export default function (source, target, opts) {
     switch (event) {
       case 'error':
         console.error(chalk.bold.red(data.message || data))
-        process.exit(data.code || 2)
+        // fs 异常的 code 是字符串(如 EPERM), 只接受数字退出码, 否则二次崩溃掩盖真实错误
+        process.exit(typeof data.code === 'number' ? data.code : 2)
         break
 
       case 'copy':

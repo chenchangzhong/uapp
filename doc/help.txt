@@ -64,7 +64,7 @@ app 工程下命令:
   - 更新打包用到的数据，包括版本信息, dcloudkey, App图标, 本地打包资源等
     uapp prepare build:app
     uapp prepare build:app dev               # dev 模式，仅清理资源不检查本地打包资源
-    uapp prepare build:app --no-webapp       # 不编译 webapp
+    uapp prepare build:app --webapp         # 同时编译 webapp (默认只更新打包数据, 不编译)
 
   - 运行自定义打包发布流程，配置见 README.md
     uapp run custom
