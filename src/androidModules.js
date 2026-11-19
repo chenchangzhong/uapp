@@ -649,3 +649,358 @@ export function patchDcloudProperties({ propsPath, sdkPropsPath, modules, sdkCon
   if (added.length) fs.writeFileSync(propsPath, out)
   return { warnings, added }
 }
+
+// <webAppDir>/nativeplugins/<插件标识>/package.json 是否声明了 Android 平台
+function declaresAndroid(pluginDir) {
+  const pkgFile = path.join(pluginDir, 'package.json')
+  if (!fs.existsSync(pkgFile)) return true
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgFile, 'utf8'))
+    return Boolean(pkg?._dp_nativeplugin?.android)
+  } catch {
+    return true
+  }
+}
+
+/*
+ * manifest 的 app-plus.nativePlugins -> android/app/nativeplugins.libs
+ *
+ * gradle 模板读取格式：每行「插件目录名 aar 文件名（不含 .aar）」，
+ * 拼成 <工程根>/nativeplugins/<目录名>/android/<aar>.aar。
+ * aar 文件名以目录里的实际文件为准（插件改名后目录名和 aar 名往往不一致）。
+ */
+export function buildAndroidNativePluginLibs({ webAppDir, nativePlugins }) {
+  const lines = []
+  const warnings = []
+  for (const id of Object.keys(nativePlugins || {})) {
+    const pluginDir = path.join(webAppDir, 'nativeplugins', id)
+    const androidDir = path.join(pluginDir, 'android')
+    const aars = fs.existsSync(androidDir)
+      ? fs.readdirSync(androidDir).filter((file) => file.endsWith('.aar')).sort()
+      : []
+    if (!aars.length) {
+      // 只支持 iOS 的插件不需要写进 Android 依赖
+      if (!declaresAndroid(pluginDir)) continue
+      warnings.push(`原生插件 ${id} 声明了 Android 平台，但 nativeplugins/${id}/android 下没有 .aar，已跳过`)
+      continue
+    }
+    for (const aar of aars) lines.push(`${id} ${aar.slice(0, -4)}`)
+  }
+  return { lines, warnings }
+}
+
+export function updateAndroidNativePluginLibs({ appDir, webAppDir, nativePlugins }) {
+  const pluginsDir = path.join(webAppDir, 'nativeplugins')
+  if (!fs.existsSync(pluginsDir)) return { warnings: [], added: [], removed: [] }
+
+  const libsFile = path.join(appDir, 'app', 'nativeplugins.libs')
+  const { lines: needed, warnings } = buildAndroidNativePluginLibs({ webAppDir, nativePlugins })
+  if (!fs.existsSync(libsFile) && !needed.length) return { warnings, added: [], removed: [] }
+
+  const raw = fs.existsSync(libsFile) ? fs.readFileSync(libsFile, 'utf8') : ''
+  // 该文件不支持注释，逐行即一条插件依赖；manifest 没声明的插件不该进包
+  const existing = raw.split(/\r?\n/).map((line) => line.trim()).filter(Boolean)
+  const neededSet = new Set(needed)
+  const removed = existing.filter((line) => !neededSet.has(line))
+  const added = needed.filter((line) => !existing.includes(line))
+  const outText = needed.join('\n') + (needed.length ? '\n' : '')
+  if (outText !== raw) fs.writeFileSync(libsFile, outText)
+  return { warnings, added, removed }
+}
+
+// 读插件的 Android 注册信息（_dp_nativeplugin.android 的 hooksClass / plugins）
+function readAndroidPluginEntry(pluginDir, id) {
+  const packageFile = path.join(pluginDir, 'package.json')
+  if (!fs.existsSync(packageFile)) return null
+  let pkg
+  try {
+    pkg = JSON.parse(fs.readFileSync(packageFile, 'utf8'))
+  } catch {
+    return null
+  }
+  const android = pkg?._dp_nativeplugin?.android
+  if (!android) return null
+  const plugins = (Array.isArray(android.plugins) ? android.plugins : [])
+    .filter((plugin) => plugin && plugin.class)
+    .map((plugin) => ({ type: plugin.type || 'module', name: plugin.name || id, class: plugin.class }))
+  if (!plugins.length) return null
+  const entry = {}
+  if (android.hooksClass) entry.hooksClass = android.hooksClass
+  entry.plugins = plugins
+  return entry
+}
+
+// dcloud_uniplugins.json：离线打包靠它把 nativeplugins 挂进运行时（对应 iOS Info.plist 的同名键）
+export function buildAndroidUniplugins({ webAppDir, nativePlugins }) {
+  const entries = []
+  const warnings = []
+  for (const id of Object.keys(nativePlugins || {})) {
+    const pluginDir = path.join(webAppDir, 'nativeplugins', id)
+    if (!fs.existsSync(pluginDir)) continue
+    const entry = readAndroidPluginEntry(pluginDir, id)
+    if (entry) {
+      entries.push(entry)
+      continue
+    }
+    if (declaresAndroid(pluginDir)) {
+      warnings.push(`原生插件 ${id} 声明了 Android 平台，但 package.json 里没有 _dp_nativeplugin.android.plugins，未注册到 dcloud_uniplugins.json`)
+    }
+  }
+  return { entries, warnings }
+}
+
+export function updateAndroidUniplugins({ appDir, webAppDir, nativePlugins }) {
+  if (!fs.existsSync(path.join(webAppDir, 'nativeplugins'))) return { warnings: [], added: [], removed: [] }
+  const file = path.join(appDir, 'app', 'src', 'main', 'assets', 'dcloud_uniplugins.json')
+  const { entries, warnings } = buildAndroidUniplugins({ webAppDir, nativePlugins })
+  if (!fs.existsSync(file) && !entries.length) return { warnings, added: [], removed: [] }
+
+  const raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : ''
+  const names = (list) => (list || []).flatMap((entry) => (entry.plugins || []).map((plugin) => plugin.name))
+  let previous = []
+  try {
+    previous = JSON.parse(raw)?.nativePlugins || []
+  } catch {
+    previous = []
+  }
+  const previousNames = names(previous)
+  const nextNames = names(entries)
+  const added = nextNames.filter((name) => !previousNames.includes(name))
+  const removed = previousNames.filter((name) => !nextNames.includes(name))
+  const outText = JSON.stringify({ nativePlugins: entries }, null, 2) + '\n'
+  if (raw !== outText) fs.writeFileSync(file, outText)
+  return { warnings, added, removed }
+}
+
+// 插件 package.json 的 _dp_nativeplugin.android 全量信息（依赖 + 参数）
+function readAndroidPluginMeta(pluginDir) {
+  const packageFile = path.join(pluginDir, 'package.json')
+  if (!fs.existsSync(packageFile)) return null
+  try {
+    return JSON.parse(fs.readFileSync(packageFile, 'utf8'))?._dp_nativeplugin?.android || null
+  } catch {
+    return null
+  }
+}
+
+// 只认带「(自动生成, 勿手改)」后缀的块, 避免把用户手写的同名注释块当成自己的
+const UAPP_GRADLE_BLOCK = /^[ \t]*\/\/ 原生插件(.+?)所需库-开始 \(自动生成, 勿手改\)\r?\n([\s\S]*?)^[ \t]*\/\/ 原生插件\1所需库-结束[ \t]*$/gm
+const UAPP_PLACEHOLDER_BLOCK = /^[ \t]*\/\/ 原生插件(.+?)占位符-开始 \(自动生成, 勿手改\)\r?\n([\s\S]*?)^[ \t]*\/\/ 原生插件\1占位符-结束[ \t]*$/gm
+
+// groovy 双引号字符串的转义, 占位符值里出引号时不能直接拼
+function escapeGradleString(text) {
+  return String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+// 伞包：声明了伞包但工程里已有其子库时不再重复写（伞包只聚合依赖，本身没有类）
+const ARTIFACT_ALIASES = {
+  'com.facebook.android:facebook-android-sdk': ['com.facebook.android:facebook-core'],
+}
+
+function escapeRegExp(text) {
+  return String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+// 按插件 package.json 算出要写进 build.gradle 的 maven 依赖与 manifestPlaceholders
+export function buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleContent }) {
+  const blocks = []
+  const placeholders = []
+  const warnings = []
+  const seenCoords = new Set()
+  // 先剔除自己之前生成的块, 否则会把自己的产物当成「工程里已有」
+  const plain = String(gradleContent || '').replace(UAPP_GRADLE_BLOCK, '').replace(UAPP_PLACEHOLDER_BLOCK, '')
+
+  for (const id of Object.keys(nativePlugins || {})) {
+    const pluginDir = path.join(webAppDir, 'nativeplugins', id)
+    if (!fs.existsSync(pluginDir)) continue
+    const meta = readAndroidPluginMeta(pluginDir)
+    if (!meta) continue
+
+    const lines = []
+    for (const dep of Array.isArray(meta.dependencies) ? meta.dependencies : []) {
+      const parts = String(dep).split(':')
+      if (parts.length < 2) continue
+      const coord = `${parts[0]}:${parts[1]}`
+      // 多个插件声明同一坐标时只写第一个（gradle 里重复声明没有意义）
+      if (seenCoords.has(coord)) continue
+      // 工程（含 uniapp/UTS/用户手写块）里已经有同一个 group:artifact 就不再写
+      if (new RegExp(`${escapeRegExp(coord)}:`).test(plain)) continue
+      const aliases = ARTIFACT_ALIASES[coord] || []
+      if (aliases.some((alias) => new RegExp(`${escapeRegExp(alias)}:`).test(plain))) continue
+      lines.push(`implementation "${dep}"`)
+      seenCoords.add(coord)
+    }
+    if (lines.length) blocks.push({ id, lines })
+
+    const params = nativePlugins[id] || {}
+    for (const [name, def] of Object.entries(meta.parameters || {})) {
+      const key = def?.key
+      if (!key) continue
+      const value = params[name]
+      if (value === undefined || value === null || value === '') {
+        warnings.push(`原生插件 ${id} 的参数 ${name}（${key}）没有配置，未写入 manifestPlaceholders`)
+        continue
+      }
+      placeholders.push({ id, key, value: String(value) })
+    }
+  }
+  return { blocks, placeholders, warnings }
+}
+
+// 统计一行里未被字符串/注释包裹的 { 与 } 数量, 用于找 dependencies { } 的收尾行
+function braceDelta(line) {
+  const stripped = line
+    .replace(/\/\/.*$/, '')
+    .replace(/"(?:[^"\\]|\\.)*"/g, '""')
+    .replace(/'(?:[^'\\]|\\.)*'/g, "''")
+  return (stripped.match(/\{/g) || []).length - (stripped.match(/\}/g) || []).length
+}
+
+// build.gradle 里插块/删块, 返回新内容与变更行
+export function applyAndroidPluginGradle(content, { blocks, placeholders }) {
+  const eol = content.includes('\r\n') ? '\r\n' : '\n'
+  let lines = content.split(/\r?\n/)
+  const added = []
+  const removed = []
+
+  // 1) 清掉旧块（连同块内的行）
+  const oldDeps = []
+  const oldPlaceholders = []
+  const kept = []
+  let skipping = null
+  for (const line of lines) {
+    const start = /^[ \t]*\/\/ 原生插件(.+?)(?:所需库|占位符)-开始 \(自动生成, 勿手改\)[ \t]*$/.exec(line)
+    if (start && !skipping) {
+      skipping = { id: start[1], kind: line.includes('所需库') ? 'deps' : 'ph' }
+      continue
+    }
+    if (skipping) {
+      const end = new RegExp(`^[ \\t]*// 原生插件${escapeRegExp(skipping.id)}${skipping.kind === 'deps' ? '所需库' : '占位符'}-结束[ \\t]*$`).test(line)
+      if (end) {
+        skipping = null
+        continue
+      }
+      const trimmed = line.trim()
+      if (trimmed) (skipping.kind === 'deps' ? oldDeps : oldPlaceholders).push(trimmed)
+      continue
+    }
+    kept.push(line)
+  }
+  // 标记块没有闭合（用户手改删了 -结束 行）时, 继续写会吞掉块后所有内容, 直接放弃
+  if (skipping) {
+    return { content, added: [], removed: [], eol, brokenMark: true }
+  }
+  lines = kept
+
+  // 2) 依赖块追加到 dependencies { } 末尾
+  if (blocks.length) {
+    const openIdx = lines.findIndex((line) => /^[ \t]*dependencies\s*\{[ \t]*$/.test(line))
+    if (openIdx === -1) {
+      // 没有 dependencies 块就放弃写入, 避免破坏文件结构
+      return { content, added: [], removed: [], eol, depsSkipped: true }
+    }
+    const baseIndent = /^[ \t]*/.exec(lines[openIdx])[0]
+    const itemIndent = `${baseIndent}    `
+    let depth = 0
+    let closeIdx = -1
+    for (let i = openIdx; i < lines.length; i++) {
+      depth += braceDelta(lines[i])
+      if (depth <= 0) {
+        closeIdx = i
+        break
+      }
+    }
+    if (closeIdx === -1) return { content, added: [], removed: [], eol, depsSkipped: true }
+
+    const inserted = []
+    blocks.forEach((block) => {
+      // 块间不加空行: 清块时状态机无法区分「自己加的分隔空行」和「用户的空行」, 会破坏幂等
+      inserted.push(`${itemIndent}// 原生插件${block.id}所需库-开始 (自动生成, 勿手改)`)
+      block.lines.forEach((line) => inserted.push(`${itemIndent}${line}`))
+      inserted.push(`${itemIndent}// 原生插件${block.id}所需库-结束`)
+    })
+    lines.splice(closeIdx, 0, ...inserted)
+  }
+
+  // 3) 占位符插到 manifestPlaceholders = [ ] 的收尾 ] 之前
+  if (placeholders.length) {
+    const openIdx = lines.findIndex((line) => /^[ \t]*manifestPlaceholders\s*=\s*\[[ \t]*$/.test(line))
+    if (openIdx === -1) {
+      return { content: lines.join(eol), added, removed, eol, placeholderSkipped: true }
+    }
+    const closeIdx = lines.findIndex((line, index) => index > openIdx && /^[ \t]*\][ \t]*$/.test(line))
+    if (closeIdx === -1) return { content: lines.join(eol), added, removed, eol, placeholderSkipped: true }
+    const existingIndent = lines[openIdx + 1] ? /^[ \t]*/.exec(lines[openIdx + 1])[0] : `${/^[ \t]*/.exec(lines[openIdx])[0]}    `
+    const groups = []
+    placeholders.forEach((item) => {
+      const group = groups.find((g) => g.id === item.id)
+      if (group) group.items.push(item)
+      else groups.push({ id: item.id, items: [item] })
+    })
+    const inserted = []
+    groups.forEach((group) => {
+      inserted.push(`${existingIndent}// 原生插件${group.id}占位符-开始 (自动生成, 勿手改)`)
+      group.items.forEach((item) => inserted.push(`${existingIndent}"${item.key}": "${escapeGradleString(item.value)}",`))
+      inserted.push(`${existingIndent}// 原生插件${group.id}占位符-结束`)
+    })
+    // 块前一条 map 项若没有逗号会拼成语法错误, 补上
+    for (let i = closeIdx - 1; i > openIdx; i--) {
+      const trimmed = lines[i].trim()
+      if (!trimmed || trimmed.startsWith('//')) continue
+      if (!trimmed.endsWith(',')) lines[i] = `${lines[i]},`
+      break
+    }
+    // 末尾项不留逗号, 避免不同 groovy 版本对尾逗号处理不一致
+    for (let i = inserted.length - 1; i >= 0; i--) {
+      if (/^\s*"[^"]+":\s*".*",$/.test(inserted[i])) {
+        inserted[i] = inserted[i].slice(0, -1)
+        break
+      }
+    }
+    lines.splice(closeIdx, 0, ...inserted)
+  }
+
+  // 只报真正新增/移除的行：自己的块每次都会被重写, 直接比内容
+  const newDeps = blocks.flatMap((block) => block.lines.map((line) => line.trim()))
+  added.push(...newDeps.filter((line) => !oldDeps.includes(line)))
+  removed.push(...oldDeps.filter((line) => !newDeps.includes(line)))
+  const newPlaceholders = placeholders.map((item) => `"${item.key}": "${escapeGradleString(item.value)}"`)
+  const oldPh = oldPlaceholders.map((line) => line.replace(/,$/, ''))
+  added.push(...newPlaceholders.filter((line) => !oldPh.includes(line)))
+  removed.push(...oldPh.filter((line) => !newPlaceholders.includes(line)))
+  return { content: lines.join(eol), added, removed, eol }
+}
+
+// 读工程 build.gradle, 按 manifest 的 nativePlugins 同步插件依赖与占位符
+export function updateAndroidPluginGradle({ appDir, webAppDir, nativePlugins }) {
+  if (!fs.existsSync(path.join(webAppDir, 'nativeplugins'))) return { warnings: [], added: [], removed: [] }
+  const file = path.join(appDir, 'app', 'build.gradle')
+  if (!fs.existsSync(file)) return { warnings: [], added: [], removed: [] }
+
+  const raw = fs.readFileSync(file, 'utf8')
+  const { blocks, placeholders, warnings } = buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleContent: raw })
+  if (!blocks.length && !placeholders.length) {
+    // 没有要写的内容时只清掉自己以前写的块
+    const result = applyAndroidPluginGradle(raw, { blocks: [], placeholders: [] })
+    if (result.brokenMark) {
+      warnings.push('build.gradle 里有未闭合的 uapp 标记块（缺少 -结束 行），为避免破坏文件未写入，请检查')
+      return { warnings, added: [], removed: [] }
+    }
+    if (result.content !== raw) fs.writeFileSync(file, result.content)
+    return { warnings, added: [], removed: result.removed }
+  }
+
+  const result = applyAndroidPluginGradle(raw, { blocks, placeholders })
+  if (result.brokenMark) {
+    warnings.push('build.gradle 里有未闭合的 uapp 标记块（缺少 -结束 行），为避免破坏文件未写入，请检查')
+    return { warnings, added: [], removed: [] }
+  }
+  if (result.depsSkipped) {
+    warnings.push('build.gradle 里没有找到 dependencies { }，插件依赖未写入')
+  }
+  if (result.placeholderSkipped) {
+    warnings.push('build.gradle 里没有找到 manifestPlaceholders = [ ]，插件参数未写入')
+  }
+  if (result.content !== raw) fs.writeFileSync(file, result.content)
+  return { warnings, added: result.added, removed: result.removed }
+}

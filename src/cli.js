@@ -19,7 +19,7 @@ import chalk from 'chalk'
 import sync from './sync.js'
 import { readConfig, configCommand } from './config.js'
 import { buildIOSModuleYml, patchFeaturePlist } from './iosModules.js'
-import { updateAndroidModuleLibs, patchDcloudProperties, ANDROID_MODULE_PERMISSIONS, SDK_CONFIG_PERMISSIONS, ANDROID_MODULE_USES_FEATURES, ANDROID_SDK31_PERMISSIONS, MODULE_SDK_CONFIG, resolveAndroidTargetSdk } from './androidModules.js'
+import { updateAndroidModuleLibs, updateAndroidNativePluginLibs, updateAndroidUniplugins, updateAndroidPluginGradle, patchDcloudProperties, ANDROID_MODULE_PERMISSIONS, SDK_CONFIG_PERMISSIONS, ANDROID_MODULE_USES_FEATURES, ANDROID_SDK31_PERMISSIONS, MODULE_SDK_CONFIG, resolveAndroidTargetSdk } from './androidModules.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -972,6 +972,24 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
     modules: $G.manifest['app-plus']?.modules,
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
   })
+  // manifest 的 nativePlugins -> android/app/nativeplugins.libs（插件改名/新增后自动同步）
+  const pluginLibs = updateAndroidNativePluginLibs({
+    appDir: $G.appDir,
+    webAppDir: $G.webAppDir,
+    nativePlugins: $G.manifest['app-plus']?.nativePlugins,
+  })
+  // 同上的插件信息还要写进 dcloud_uniplugins.json，离线打包运行时靠它挂载插件
+  const pluginRegistry = updateAndroidUniplugins({
+    appDir: $G.appDir,
+    webAppDir: $G.webAppDir,
+    nativePlugins: $G.manifest['app-plus']?.nativePlugins,
+  })
+  // 插件 package.json 里的 maven 依赖与参数 -> app/build.gradle
+  const pluginGradle = updateAndroidPluginGradle({
+    appDir: $G.appDir,
+    webAppDir: $G.webAppDir,
+    nativePlugins: $G.manifest['app-plus']?.nativePlugins,
+  })
   if (androidModuleNotice.errors?.length) {
     androidModuleNotice.errors.forEach((error) => console.log(chalk.red(error)))
     console.log(chalk.red('❌ Android 模块缺少权限声明，打包中止'))
@@ -979,8 +997,14 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
   }
   $G.androidModuleNotice = {
     ...androidModuleNotice,
-    warnings: [...androidModuleNotice.warnings, ...featurePatch.warnings],
+    warnings: [...androidModuleNotice.warnings, ...featurePatch.warnings, ...pluginLibs.warnings, ...pluginRegistry.warnings, ...pluginGradle.warnings],
     featureAdded: featurePatch.added,
+    pluginAdded: pluginLibs.added,
+    pluginRemoved: pluginLibs.removed,
+    registryAdded: pluginRegistry.added,
+    registryRemoved: pluginRegistry.removed,
+    gradleAdded: pluginGradle.added,
+    gradleRemoved: pluginGradle.removed,
   }
 
   console.log('✅ updateAndroidMetaData')
@@ -2374,12 +2398,30 @@ function printModuleNotice() {
     $G.androidModuleNotice = null
     if (android.warnings.length) android.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
     if (android.featureAdded?.length) console.log(`✅ dcloud_properties.xml 已注册模块 feature：${android.featureAdded.join(', ')}`)
+    if (android.pluginAdded?.length || android.pluginRemoved?.length) {
+      const parts = []
+      if (android.pluginAdded.length) parts.push(`新增 ${android.pluginAdded.join(', ')}`)
+      if (android.pluginRemoved.length) parts.push(`移除 ${android.pluginRemoved.join(', ')}`)
+      console.log(`✅ Android 原生插件依赖已更新 nativeplugins.libs：${parts.join('；')}`)
+    }
+    if (android.registryAdded?.length || android.registryRemoved?.length) {
+      const parts = []
+      if (android.registryAdded.length) parts.push(`新增 ${android.registryAdded.join(', ')}`)
+      if (android.registryRemoved.length) parts.push(`移除 ${android.registryRemoved.join(', ')}`)
+      console.log(`✅ dcloud_uniplugins.json 已更新插件注册：${parts.join('；')}`)
+    }
+    if (android.gradleAdded?.length || android.gradleRemoved?.length) {
+      const parts = []
+      if (android.gradleAdded.length) parts.push(`新增 ${android.gradleAdded.join(', ')}`)
+      if (android.gradleRemoved.length) parts.push(`移除 ${android.gradleRemoved.join(', ')}`)
+      console.log(`✅ Android 插件依赖/参数已写入 app/build.gradle：${parts.join('；')}`)
+    }
     if (android.added.length || android.removed.length) {
       const parts = []
       if (android.added.length) parts.push(`新增 ${android.added.join(', ')}`)
       if (android.removed.length) parts.push(`移除 ${android.removed.join(', ')}（模块已取消勾选）`)
       console.log(`✅ Android 模块依赖已更新 sdk.libs：${parts.join('；')}`)
-    } else if (!android.featureAdded?.length) {
+    } else if (!android.featureAdded?.length && !android.pluginAdded?.length && !android.registryAdded?.length && !android.gradleAdded?.length && !android.gradleRemoved?.length) {
       console.log('✅ Android 模块依赖已是最新')
     }
   }
