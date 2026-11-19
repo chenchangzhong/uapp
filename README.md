@@ -608,6 +608,24 @@ uapp 在 iOS 构建时按 `modules` + `sdkConfigs` 自动补缺失节点，已�
 - `schemes` 写到每个带 `VIEW` intent-filter 的 activity（`PandoraEntry`、`PandoraEntryActivity`），已存在的 scheme 不重复写
 - 没配的字段不动工程文件；`android.abiFilters`、`android.manifest` 暂不支持
 
+### 🧩 Android 模块依赖（modules）
+
+iOS 侧把模块依赖写进 `config/custom.yml`，Android 侧对应的是 `android/app/sdk.libs`（每行一个依赖文件名，gradle 模板按行从 `~/.uappsdk/android/SDK/libs` 引入）。uapp 按 manifest 的 `app-plus.modules` / `app-plus.distribute.sdkConfigs` 自动追加，映射依据官方文档 [AppDocs/usemodule/androidModuleConfig](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/androidModuleConfig/)：
+
+- 模块 → 依赖（本机 SDK 已有对应 aar）：`Bluetooth`→`Bluetooth-release.aar`；`Contact`→`contacts-release.aar`；`Fingerprint`→`fingerprint-release.aar`；`iBeacon`→`iBeacon-release.aar`；`Messaging`→`messaging-release.aar`；`SQLite`→`sqlite-release.aar`；`VideoPlayer`→`media-release.aar`+`weex_videoplayer-release.aar`；`LivePusher`→`weex_livepusher-release.aar`；`Webview-x5`→`webview-x5-release.aar`+`weex_webview-x5-release.aar`（`Camera`/`Gallery` 已内置于 `lib.5plus.base-release.aar`，无需额外 aar）
+- `Barcode`、`Record`、`Orientation`、`Proximity`、`Share` 等模块已包含在 `lib.5plus.base-release.aar` 内，无需额外依赖
+- `sdkConfigs` 平台 → 依赖：`geolocation.baidu/amap`、`maps.baidu/amap/google`、`oauth.weixin/qq/sina/google/facebook/univerify`、`payment.alipay/weixin/paypal/stripe/google`、`push.unipush/igexin/fcm`、`share.weixin/qq/sina`、`speech.baidu/ifly`、`statics.umeng/google`（`oauth.apple`、`payment.appleiap` 仅 iOS，忽略）
+- **清理机制（自动判断）**：不生成额外文件。每次打包按当前勾选的模块补齐缺失行；映射表认识、但已不被任何勾选模块需要的行（如取消勾选 `VideoPlayer` 后的 `media-release.aar`）确认无用后直接删除并在构建末尾提示；映射表不认识的行（`lib.5plus.base`、`debug-server`、用户自己加的依赖）一律保留；内容无变化时不动文件
+- 依赖文件名支持通配符（如 `AMap3DMap_*.aar`、`open_sdk_*.jar`），gradle 的 `fileTree include` 本身支持
+- **缺文件告警**：映射表里的文件在 `~/.uappsdk/android/SDK/libs` 找不到时告警（部分文件 SDK 未提供，如个推 `gtc.aar`、友盟 `umeng-abtest`），请自行补到 SDK libs 目录或改用 maven 依赖
+- **第三方 maven 告警**：DCloud 的 aar 只是胶水层，真身是第三方 SDK。模板 `build.gradle` 只内置了微信 SDK；Google 登录（`play-services-auth`）、Google 支付（`play-services-wallet`）、Facebook（`com.facebook.android:facebook-login`）、支付宝/Stripe/PayPal、个推（`gtsdk`+`gtc-dcloud`）、Firebase（FCM/统计）、Google 地图等还需要手动加 maven 依赖。提示前会先检索 `app/build.gradle`，**已经写了对应依赖就不再提示**
+- **uniPush 厂商通道**：`unipush` 对象下除 `version`/`offline` 外的键都算厂商（如 `hms:{}`），勾了哪个才提示哪个。按官方 push.html（HBuilderX 3.99+ 仓储方式）提示的是 maven 依赖而非 aar 文件：华为→`com.getui.opt:hwp`+`com.huawei.hms:push`、荣耀→`com.getui.opt:honor`+`com.hihonor.mcs:push`、OPPO→`com.assist-v3:oppo`、vivo→`com.assist-v3:vivo`、小米→`com.getui.opt:xmp`、魅族→`com.getui.opt:mzp`；提示前先检索 `app/build.gradle`，已写不重复提示；根目录 `build.gradle` 需加个推 maven 仓；厂商 appid/key 等参数在 DCloud 开发者中心配置
+- Android 不需要 iOS 式的 feature.plist 注册，但**工程的 `dcloud_properties.xml` 需要**：工程模板自带 23 个 feature，官方文档要求勾选模块后在 `app/src/main/assets/data/dcloud_properties.xml` 注册 feature（`Camera`→`Camera`、`VideoPlayer`→`VideoPlayer`、`Barcode`→`Barcode`、`Bluetooth`→`Bluetooth`、`Contact`→`Contacts`、`Fingerprint`→`Fingerprint`、`iBeacon`→`iBeacon`、`LivePusher`→`LivePusher`、`Messaging`→`Messaging`、`SQLite`→`Sqlite`，三方模块还有 `Geolocation`/`Maps`/`OAuth`/`Payment`/`Push`/`Share`/`Speech`/`Statistic`）。uapp 按勾选模块从 SDK 自带的同名文件（41 个 feature）提取节点补进工程文件；`Maps` 按 `sdkConfigs.maps` 的 provider 在 amap/baidu 两个注册值间选择（官方 map.html：只剩谷歌地图时不需要注册）。三方平台还要求在 feature 节点下加 `<module>` 子节点、在 `<services>` 下加 `<service>` 节点（如 `OAuth-Google`/`OAuth-IGETui`/`OAuth-Facebook`、`Payment-Paypal`/`Payment-Stripe`/`Payment-Google`、`Push.unipush`/`fcm`+service `push`、`Statistic-Umeng`/`Statistic-Google`+service、百度地图 service `Maps`），uapp 一并补进（幂等；工程里已有的子节点不重复加）；SDK 里找不到对应节点时告警
+- **权限自动写入**：官方文档要求模块勾选后在 AndroidManifest 声明权限（如 Camera→CAMERA、Barcode→CAMERA+VIBRATE+FLASHLIGHT、Contact→GET_ACCOUNTS+WRITE/READ_CONTACTS、Record→RECORD_AUDIO+MODIFY_AUDIO_SETTINGS、LivePusher→网络+存储+录音等 10 项）。uapp 自动把缺的 `<uses-permission>` 补进 `app/src/main/AndroidManifest.xml`（`excludePermissions` 里明确排除的不补）；只有 AndroidManifest.xml 不存在或不可写时才报错中止
+- **uses-feature 与 Android 12 蓝牙权限**：官方 others.html 要求 `Barcode`/`LivePusher` 勾选后补 `<uses-feature>`（`android.hardware.camera` 等）；`Bluetooth`/`iBeacon` 在 `targetSdkVersion` 31 及以上需追加 `BLUETOOTH_SCAN`+`BLUETOOTH_CONNECT`（targetSdk 从 manifest `distribute.android.targetSdkVersion` 或 `app/build.gradle` 读取，取不到按 31+ 处理）
+- **三方 provider 权限**：官方各三方章节要求的权限（如 geolocation.amap 13 项含 `ACCESS_BACKGROUND_LOCATION`+`FOREGROUND_SERVICE`、高德/百度地图 11 项、谷歌地图 6 项、`share.sina` 的 Wi-Fi 状态权限等）按勾选模块+已配置的 provider 自动补进 AndroidManifest
+- 结果在构建流程末尾统一输出（不会被 gradle 日志冲掉），没有新增时输出 `✅ Android 模块依赖已是最新`
+
 ## 五、其他参考
 
 ### 生成用户注册协议，隐私协议

@@ -19,6 +19,7 @@ import chalk from 'chalk'
 import sync from './sync.js'
 import { readConfig, configCommand } from './config.js'
 import { buildIOSModuleYml, patchFeaturePlist } from './iosModules.js'
+import { updateAndroidModuleLibs, patchDcloudProperties, ANDROID_MODULE_PERMISSIONS, SDK_CONFIG_PERMISSIONS, ANDROID_MODULE_USES_FEATURES, ANDROID_SDK31_PERMISSIONS, MODULE_SDK_CONFIG, resolveAndroidTargetSdk } from './androidModules.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -67,8 +68,9 @@ let $G = {
   webAppDir: '',
   projectType: 'unknown',
   config: {},
-  // iOS 模块/feature.plist 的结果先存起来，等 xcodebuild 的大量日志刷完再打印
-  iosModuleNotice: null
+  // iOS/Android 模块依赖的结果先存起来，等 xcodebuild / gradle 的大量日志刷完再统一打印
+  iosModuleNotice: null,
+  androidModuleNotice: null
 }
 
 export default function (inputArgs) {
@@ -542,6 +544,7 @@ export default function (inputArgs) {
             uploadFile(buildOutFile)
           }
         }
+        printModuleNotice()
         return
       }
 
@@ -661,7 +664,7 @@ export default function (inputArgs) {
         console.log(
           chalk.yellow('iOS: base=真机自定义基座, test=测试包, sim=模拟器包, release=正式包 (需 config/export_release.plist)')
         )
-        printIOSModuleNotice()
+        printModuleNotice()
       }
     })()
   }
@@ -880,7 +883,7 @@ function prepareCommand() {
   // run build:app* 的结果由构建分支末尾统一输出，避免重复；prepare 单独执行时在这里输出
   const isRunBuild =
     $G.args.argv.remain[0] === 'run' && String($G.args.argv.remain[1] || '').startsWith('build:app')
-  if (!isRunBuild) printIOSModuleNotice()
+  if (!isRunBuild) printModuleNotice()
 }
 
 /*
@@ -955,6 +958,31 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
 
   updateAndroidManifest()
 
+  // 按 manifest modules / sdkConfigs 更新 android/app/sdk.libs（结果延后到构建末尾打印）
+  const androidModuleNotice = updateAndroidModuleLibs({
+    appDir: $G.appDir,
+    sdkHomeDir: $G.sdkHomeDir,
+    modules: $G.manifest['app-plus']?.modules,
+    sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
+  })
+  // 工程模板的 dcloud_properties.xml 只有 23 个 feature，按勾选模块从 SDK 的同名文件补注册
+  const featurePatch = patchDcloudProperties({
+    propsPath: path.join($G.appDir, 'app/src/main/assets/data/dcloud_properties.xml'),
+    sdkPropsPath: path.join($G.sdkHomeDir, 'android/SDK/assets/data/dcloud_properties.xml'),
+    modules: $G.manifest['app-plus']?.modules,
+    sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
+  })
+  if (androidModuleNotice.errors?.length) {
+    androidModuleNotice.errors.forEach((error) => console.log(chalk.red(error)))
+    console.log(chalk.red('❌ Android 模块缺少权限声明，打包中止'))
+    process.exit(1)
+  }
+  $G.androidModuleNotice = {
+    ...androidModuleNotice,
+    warnings: [...androidModuleNotice.warnings, ...featurePatch.warnings],
+    featureAdded: featurePatch.added,
+  }
+
   console.log('✅ updateAndroidMetaData')
 }
 
@@ -987,7 +1015,41 @@ function updateAndroidManifest() {
   const permissions = Array.isArray(android?.permissions) ? android.permissions : []
   const excludePermissions = Array.isArray(android?.excludePermissions) ? android.excludePermissions : []
   const schemes = toValueList(android?.schemes)
-  if (!permissions.length && !excludePermissions.length && !schemes.length) return
+  // 勾选的模块在官方文档要求下需要的权限，自动补进 AndroidManifest.xml（excludePermissions 明确排除的不补）
+  const modulePermissions = new Set()
+  Object.keys($G.manifest['app-plus']?.modules || {}).forEach((moduleKey) => {
+    ;(ANDROID_MODULE_PERMISSIONS[moduleKey] || []).forEach((name) => modulePermissions.add(name))
+  })
+  // 三方 provider 章节要求的权限（官方 geolocation/map/pay/share/speech/statistic 各页），同样受 excludePermissions 约束
+  const androidSdkConfigs = $G.manifest['app-plus']?.distribute?.sdkConfigs || {}
+  Object.keys(MODULE_SDK_CONFIG).forEach((moduleKey) => {
+    if (!$G.manifest['app-plus']?.modules?.[moduleKey]) return
+    const config = androidSdkConfigs[MODULE_SDK_CONFIG[moduleKey]]
+    if (!config) return
+    Object.keys(config).forEach((provider) => {
+      ;(SDK_CONFIG_PERMISSIONS[MODULE_SDK_CONFIG[moduleKey]]?.[provider] || []).forEach((name) => modulePermissions.add(name))
+    })
+  })
+  // 官方 others.html：targetSdkVersion 31 及以上勾选 Bluetooth/iBeacon 需追加 BLUETOOTH_SCAN/BLUETOOTH_CONNECT
+  let gradleContent = null
+  const gradleFile = path.join($G.appDir, 'app', 'build.gradle')
+  if (fs.existsSync(gradleFile)) gradleContent = fs.readFileSync(gradleFile, 'utf8')
+  const targetSdk = resolveAndroidTargetSdk(android?.targetSdkVersion, gradleContent)
+  if (targetSdk === null || targetSdk >= 31) {
+    ;['Bluetooth', 'iBeacon'].forEach((moduleKey) => {
+      if ($G.manifest['app-plus']?.modules?.[moduleKey]) ANDROID_SDK31_PERMISSIONS.forEach((name) => modulePermissions.add(name))
+    })
+  }
+  // 官方 others.html 要求的 uses-feature（Barcode/LivePusher 章节）
+  const moduleUsesFeatures = new Set()
+  Object.keys($G.manifest['app-plus']?.modules || {}).forEach((moduleKey) => {
+    ;(ANDROID_MODULE_USES_FEATURES[moduleKey] || []).forEach((name) => moduleUsesFeatures.add(name))
+  })
+  excludePermissions.forEach((entry) => {
+    const name = androidPermissionName(entry)
+    if (name) modulePermissions.delete(name)
+  })
+  if (!permissions.length && !excludePermissions.length && !schemes.length && !modulePermissions.size && !moduleUsesFeatures.size) return
 
   const manifestFile = path.join($G.appDir, 'app/src/main/AndroidManifest.xml')
   if (!fs.existsSync(manifestFile)) return
@@ -1018,6 +1080,36 @@ function updateAndroidManifest() {
     insertPermissionLine(`<uses-permission android:name="${name}" />`)
     addedPermissions++
   })
+
+  let addedModulePermissions = 0
+  modulePermissions.forEach((name) => {
+    if (hasPermission(name)) return
+    insertPermissionLine(`<uses-permission android:name="${name}" />`)
+    addedModulePermissions++
+  })
+
+  // uses-feature 插在 uses-permission/uses-feature 区块末尾，缩进对齐
+  let addedUsesFeatures = 0
+  if (moduleUsesFeatures.size) {
+    const hasFeature = (name) => new RegExp(`<uses-feature[^>]*android:name="${escapeRe(name)}"`).test(content)
+    const insertFeatureLine = (line) => {
+      const matches = [...content.matchAll(/^[ \t]*<uses-(?:permission|feature)\b[^>]*\/>[ \t]*$/gm)]
+      const indent = matches.length ? (/^[ \t]*/.exec(matches[0][0])[0]) : '  '
+      if (matches.length) {
+        const last = matches[matches.length - 1]
+        const insertAt = last.index + last[0].length
+        content = content.slice(0, insertAt) + '\n' + indent + line + content.slice(insertAt)
+      } else {
+        insertPermissionLine(line)
+        return
+      }
+    }
+    moduleUsesFeatures.forEach((name) => {
+      if (hasFeature(name)) return
+      insertFeatureLine(`<uses-feature android:name="${name}" />`)
+      addedUsesFeatures++
+    })
+  }
 
   let excludedPermissions = 0
   excludePermissions.forEach((entry) => {
@@ -1073,7 +1165,7 @@ function updateAndroidManifest() {
   if (content === original) return
 
   fs.writeFileSync(manifestFile, content)
-  console.log(`✅ updateAndroidManifest (permissions: +${addedPermissions}, exclude: ${excludedPermissions}, schemes: +${addedSchemes})`)
+  console.log(`✅ updateAndroidManifest (permissions: +${addedPermissions}, module: +${addedModulePermissions}, feature: +${addedUsesFeatures}, exclude: ${excludedPermissions}, schemes: +${addedSchemes})`)
 }
 
 function updateAndroidIcons(resDir) {
@@ -2265,16 +2357,31 @@ function updateIOSUniplugins(plistFile, plugins) {
   }
 }
 
-// 放在构建流程最后打印，避免被 xcodegen / xcodebuild 的输出冲掉
-function printIOSModuleNotice() {
-  const notice = $G.iosModuleNotice
-  if (!notice) return
-  $G.iosModuleNotice = null
-  if (notice.warnings.length) notice.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
-  if (notice.added.length) {
-    console.log(`✅ feature.plist 已注册模块：${notice.added.join(', ')}`)
-  } else {
-    console.log('✅ iOS 模块依赖与 feature.plist 均已是最新')
+// 放在构建流程最后打印，避免被 xcodegen / xcodebuild / gradle 的输出冲掉
+function printModuleNotice() {
+  const ios = $G.iosModuleNotice
+  if (ios) {
+    $G.iosModuleNotice = null
+    if (ios.warnings.length) ios.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
+    if (ios.added.length) {
+      console.log(`✅ feature.plist 已注册模块：${ios.added.join(', ')}`)
+    } else {
+      console.log('✅ iOS 模块依赖与 feature.plist 均已是最新')
+    }
+  }
+  const android = $G.androidModuleNotice
+  if (android) {
+    $G.androidModuleNotice = null
+    if (android.warnings.length) android.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
+    if (android.featureAdded?.length) console.log(`✅ dcloud_properties.xml 已注册模块 feature：${android.featureAdded.join(', ')}`)
+    if (android.added.length || android.removed.length) {
+      const parts = []
+      if (android.added.length) parts.push(`新增 ${android.added.join(', ')}`)
+      if (android.removed.length) parts.push(`移除 ${android.removed.join(', ')}（模块已取消勾选）`)
+      console.log(`✅ Android 模块依赖已更新 sdk.libs：${parts.join('；')}`)
+    } else if (!android.featureAdded?.length) {
+      console.log('✅ Android 模块依赖已是最新')
+    }
   }
 }
 
