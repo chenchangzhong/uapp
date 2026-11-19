@@ -18,6 +18,7 @@ import tiged from '@uappx/tiged'
 import chalk from 'chalk'
 import sync from './sync.js'
 import { readConfig, configCommand } from './config.js'
+import { buildIOSModuleYml, patchFeaturePlist } from './iosModules.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -65,7 +66,9 @@ let $G = {
   manifest: {},
   webAppDir: '',
   projectType: 'unknown',
-  config: {}
+  config: {},
+  // iOS 模块/feature.plist 的结果先存起来，等 xcodebuild 的大量日志刷完再打印
+  iosModuleNotice: null
 }
 
 export default function (inputArgs) {
@@ -658,6 +661,7 @@ export default function (inputArgs) {
         console.log(
           chalk.yellow('iOS: base=真机自定义基座, test=测试包, sim=模拟器包, release=正式包 (需 config/export_release.plist)')
         )
+        printIOSModuleNotice()
       }
     })()
   }
@@ -872,6 +876,11 @@ function prepareCommand() {
     sync(compiledDir, path.join(embedAppsDir, $G.manifest.appid, 'www'))
     console.log(chalk.green('APP打包所需资源已更新'))
   }
+
+  // run build:app* 的结果由构建分支末尾统一输出，避免重复；prepare 单独执行时在这里输出
+  const isRunBuild =
+    $G.args.argv.remain[0] === 'run' && String($G.args.argv.remain[1] || '').startsWith('build:app')
+  if (!isRunBuild) printIOSModuleNotice()
 }
 
 /*
@@ -1210,6 +1219,17 @@ function updateIOSMetaData() {
     console.log('打包请用 uapp run build:app-plus base|test|sim|release')
   }
 
+  let sdkLinkDir = path.join($G.appDir, '/SDKs/SDK')
+  if (!fs.existsSync(sdkLinkDir)) {
+    let iosSDKDir = path.join($G.sdkHomeDir, '/ios/SDK')
+    if (!fs.existsSync(iosSDKDir)) {
+      console.log('找不到iOS SDK，请参照 README 配置')
+      console.log('SDK 位置: ' + iosSDKDir)
+    } else {
+      fs.symlinkSync(path.join($G.sdkHomeDir, '/ios/SDK'), sdkLinkDir, 'dir')
+    }
+  }
+
   updateIOSVersions()
 
   if (config) {
@@ -1224,17 +1244,6 @@ function updateIOSMetaData() {
 
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppDev/control.xml'))
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppRelease/control.xml'))
-
-  let sdkLinkDir = path.join($G.appDir, '/SDKs/SDK')
-  if (!fs.existsSync(sdkLinkDir)) {
-    let iosSDKDir = path.join($G.sdkHomeDir, '/ios/SDK')
-    if (!fs.existsSync(iosSDKDir)) {
-      console.log('找不到iOS SDK，请参照 README 配置')
-      console.log('SDK 位置: ' + iosSDKDir)
-    } else {
-      fs.symlinkSync(path.join($G.sdkHomeDir, '/ios/SDK'), sdkLinkDir, 'dir')
-    }
-  }
 
   console.log(config ? `✅ updateIOSMetaData (${rawBuildType}: ${config.package})` : '✅ updateIOSMetaData (仅版本/资源)')
 }
@@ -1769,8 +1778,11 @@ function toIOSProjectPath(target) {
 
 // 插件 frameworks / resources 转换成 xcodegen 的 targetTemplates.uAppBase 配置
 function buildIOSNativePluginYml(plugins) {
-  const dependencies = []
-  const sources = []
+  const groups = new Map()
+  const groupOf = (name) => {
+    if (!groups.has(name)) groups.set(name, { name, dependencies: [], sources: [] })
+    return groups.get(name)
+  }
   const baseYml = path.join($G.appDir, 'config/base.yml')
   const seenDependencies = new Set()
   const seenSources = new Set()
@@ -1783,7 +1795,8 @@ function buildIOSNativePluginYml(plugins) {
     }
   }
 
-  plugins.forEach(({ dir, ios }) => {
+  plugins.forEach(({ id, dir, ios }) => {
+    const group = groupOf(id)
     const iosDir = path.join(dir, 'ios')
     const embedFrameworks = new Set(ios.embedFrameworks || [])
     const frameworks = [...(ios.frameworks || [])]
@@ -1801,7 +1814,7 @@ function buildIOSNativePluginYml(plugins) {
       if (!exists && (/\.(tbd|dylib)$/.test(name) || (!name.includes('/') && name.endsWith('.framework')))) {
         if (seenDependencies.has(name)) return
         seenDependencies.add(name)
-        dependencies.push(`- sdk: ${name}`)
+        group.dependencies.push(`- sdk: ${name}`)
         return
       }
 
@@ -1810,7 +1823,7 @@ function buildIOSNativePluginYml(plugins) {
       seenDependencies.add(projectPath)
 
       const embed = exists && embedFrameworks.has(name) && /\.(framework|xcframework)$/.test(name)
-      dependencies.push(`- framework: ${projectPath}`, `  embed: ${embed}`, `  codeSign: ${embed}`)
+      group.dependencies.push(`- framework: ${projectPath}`, `  embed: ${embed}`, `  codeSign: ${embed}`)
     })
 
     ;[...(ios.resources || []), ...(ios.assets || [])].forEach((resource) => {
@@ -1819,18 +1832,284 @@ function buildIOSNativePluginYml(plugins) {
       if (seenSources.has(line)) return
       seenSources.add(line)
 
-      sources.push(line)
+      group.sources.push(line)
       if (fs.existsSync(target) && fs.statSync(target).isDirectory() && !/\.\w+$/.test(resource)) {
-        sources.push('  type: folder')
+        group.sources.push('  type: folder')
       }
-      sources.push('  buildPhase: resources')
+      group.sources.push('  buildPhase: resources')
     })
   })
 
-  return { dependencies, sources }
+  return { groups: [...groups.values()] }
 }
 
-function updateIOSCustomYml({ dependencies, sources }) {
+// 模块依赖与原生插件依赖按模块名合并，组内按依赖路径 / sdk 名去重
+function mergeIOSYml(...parts) {
+  const groups = new Map()
+  const seenDependencies = new Set()
+  const seenSources = new Set()
+
+  const groupLines = (lines) => {
+    const result = []
+    lines.forEach((line) => {
+      if (/^ {2}/.test(line)) {
+        if (result.length) result[result.length - 1].push(line)
+      } else {
+        result.push([line])
+      }
+    })
+    return result
+  }
+
+  parts.forEach(({ groups: partGroups = [] }) => {
+    partGroups.forEach(({ name, dependencies = [], sources = [] }) => {
+      if (!groups.has(name)) groups.set(name, { name, dependencies: [], sources: [] })
+      const group = groups.get(name)
+
+      groupLines(dependencies).forEach((item) => {
+        const key = item[0].replace(/^- (?:sdk|framework): /, '')
+        if (seenDependencies.has(key)) return
+        seenDependencies.add(key)
+        group.dependencies.push(...item)
+      })
+
+      groupLines(sources).forEach((item) => {
+        const key = item[0].replace(/^- path: /, '')
+        if (seenSources.has(key)) return
+        seenSources.add(key)
+        group.sources.push(...item)
+      })
+    })
+  })
+
+  return { groups: [...groups.values()] }
+}
+
+// uAppBase 已被手写内容占用时，按库文件名去重追加缺失的依赖/资源，保留原有内容；返回 null 表示无法解析
+const uappMarkStart = (name) => `# ${name}-start (自动生成, 勿手改)`
+const uappMarkEnd = (name) => `# ${name}-end`
+const UAPP_MARK_START = /^#\s*(.+?)-start\s*\(自动生成, 勿手改\)\s*$/
+const UAPP_MARK_END = /^#\s*(.+?)-end\s*$/
+// 用户手写的原生插件块（如 `# sn-adjust1原生插件-start`），uapp 不新建块，只把缺的条目补进去
+const PLUGIN_MARK_START = /^#\s*(.+?)原生插件-start\s*$/
+const PLUGIN_MARK_END = /^#\s*(.+?)原生插件-end\s*$/
+
+function mergeIntoUAppBase(content, groups) {
+  let text = content
+  let added = 0
+
+  const keyOf = (line) => {
+    const match = /^\s*- (?:sdk|framework|path): (.+?)\s*$/.exec(line)
+    return match ? match[1].split('/').pop() : null
+  }
+
+  const groupLines = (lines) => {
+    const result = []
+    lines.forEach((line) => {
+      if (/^ {2}/.test(line)) {
+        if (result.length) result[result.length - 1].push(line)
+      } else {
+        result.push([line])
+      }
+    })
+    return result
+  }
+
+  const apply = (sectionName, pick) => {
+    if (text === null) return
+    const lines = text.split('\n')
+    const headerIndex = lines.findIndex((line) => /^ {4}uAppBase:\s*$/.test(line))
+    if (headerIndex === -1) {
+      text = null
+      return
+    }
+
+    let blockEnd = lines.length
+    for (let i = headerIndex + 1; i < lines.length; i++) {
+      if (/^ {0,4}\S/.test(lines[i])) {
+        blockEnd = i
+        break
+      }
+    }
+
+    const sectionIndex = lines.findIndex(
+      (line, i) => i > headerIndex && i < blockEnd && new RegExp(`^ {8}${sectionName}:\\s*$`).test(line)
+    )
+
+    let listEnd = sectionIndex + 1
+    if (sectionIndex !== -1) {
+      while (listEnd < blockEnd && !/^ {8}\S/.test(lines[listEnd])) listEnd++
+      while (listEnd > sectionIndex + 1 && lines[listEnd - 1].trim() === '') listEnd--
+    }
+
+    // 解析现有条目：条目/注释各自独立，同时标记哪些在 uapp 生成的标记块里（下次整块重写）
+    const items = []
+    let inMark = false
+    let inHand = null
+    let current = null
+    if (sectionIndex !== -1) {
+      for (let i = sectionIndex + 1; i < listEnd; i++) {
+        const line = lines[i]
+        const trimmed = line.trim()
+        if (trimmed === '') {
+          current = null
+          continue
+        }
+        if (trimmed.startsWith('#')) {
+          const startMatch = UAPP_MARK_START.exec(trimmed)
+          if (startMatch) {
+            inMark = true
+            items.push({ kind: 'mark', lines: [line] })
+            current = null
+            continue
+          }
+          const pluginStart = PLUGIN_MARK_START.exec(trimmed)
+          if (pluginStart) {
+            inHand = pluginStart[1]
+            items.push({ kind: 'handStart', handName: inHand, lines: [line] })
+            current = null
+            continue
+          }
+          const endMatch = UAPP_MARK_END.exec(trimmed)
+          if (endMatch && inMark) {
+            inMark = false
+            items.push({ kind: 'mark', lines: [line] })
+            current = null
+            continue
+          }
+          const pluginEnd = PLUGIN_MARK_END.exec(trimmed)
+          if (pluginEnd && inHand) {
+            items.push({ kind: 'handEnd', handName: inHand, lines: [line] })
+            inHand = null
+            current = null
+            continue
+          }
+          items.push({ kind: 'comment', lines: [line], inMark: Boolean(inMark) })
+          current = null
+          continue
+        }
+        if (/^\s+- /.test(line)) {
+          current = { kind: 'entry', lines: [line], inMark: Boolean(inMark), inHand: Boolean(inHand) }
+          items.push(current)
+        } else if (current && /^\s{2,}\S/.test(line)) {
+          current.lines.push(line)
+        } else {
+          current = null
+        }
+      }
+    }
+
+    // 块外已有的依赖（用户手写或别的工具生成）优先保留，uapp 不再重复写入
+    const outsideKeys = new Set(
+      items
+        .filter((item) => item.kind === 'entry' && !item.inMark)
+        .map((item) => keyOf(item.lines[0]))
+        .filter(Boolean)
+    )
+
+    // 本次要写入的条目：按模块分组，跨组按 key 去重（先出现的模块持有该依赖）
+    const freshGroups = []
+    const seenFresh = new Set()
+    groups.forEach(({ name, dependencies = [], sources = [] }) => {
+      const list = pick({ dependencies, sources })
+      if (!list || !list.length) return
+      const kept = []
+      groupLines(list).forEach((item) => {
+        const key = keyOf(item[0])
+        if (key) {
+          if (outsideKeys.has(key)) return
+          if (seenFresh.has(key)) return
+          seenFresh.add(key)
+        }
+        kept.push(item)
+      })
+      if (kept.length) freshGroups.push({ name, items: kept })
+    })
+
+    // 块外条目与用户手写注释一律保留；旧 uapp 标记块里的条目丢弃后重写
+    const kept = items.filter((item) => item.kind !== 'mark' && !item.inMark)
+
+    const oldMarkedKeys = new Set(
+      items.filter((item) => item.kind === 'entry' && item.inMark).map((item) => keyOf(item.lines[0])).filter(Boolean)
+    )
+    freshGroups.forEach((group) => {
+      group.items.forEach((item) => {
+        const key = keyOf(item[0])
+        if (!key || !oldMarkedKeys.has(key)) added++
+      })
+    })
+
+    const keptLines = []
+    // 手写插件块优先：同名模块的条目补进该块 -end 前，不再新建 uapp 块
+    const handNames = new Set(items.filter((item) => item.kind === 'handStart').map((item) => item.handName))
+    const handAdds = new Map()
+    const uappGroups = []
+    freshGroups.forEach((group) => {
+      if (handNames.has(group.name)) {
+        handAdds.set(
+          group.name,
+          group.items.flatMap((item) => item.map((line) => `            ${line}`))
+        )
+      } else {
+        uappGroups.push(group)
+      }
+    })
+
+    kept.forEach((item) => {
+      if (item.kind === 'handEnd') {
+        const adds = handAdds.get(item.handName)
+        if (adds && adds.length) {
+          keptLines.push(...adds)
+          handAdds.delete(item.handName)
+        }
+      }
+      keptLines.push(...item.lines)
+    })
+
+    const markLines = uappGroups.flatMap((group) => [
+      `            ${uappMarkStart(group.name)}`,
+      ...group.items.flatMap((item) => item.map((line) => `            ${line}`)),
+      `            ${uappMarkEnd(group.name)}`
+    ])
+
+    if (sectionIndex === -1) {
+      if (!markLines.length) return
+      let insertAt = blockEnd
+      while (insertAt > headerIndex + 1 && lines[insertAt - 1].trim() === '') insertAt--
+      lines.splice(insertAt, 0, `        ${sectionName}:`, ...markLines)
+      text = lines.join('\n')
+      return
+    }
+
+    if (!keptLines.length && !markLines.length) {
+      lines.splice(sectionIndex, listEnd - sectionIndex)
+      text = lines.join('\n')
+      return
+    }
+
+    lines.splice(sectionIndex + 1, listEnd - sectionIndex - 1, ...keptLines, ...markLines)
+    text = lines.join('\n')
+  }
+
+  apply('dependencies', ({ dependencies }) => dependencies)
+  apply('sources', ({ sources }) => sources)
+  return text === null ? null : { content: text, added }
+}
+
+// 模块/插件全部关掉后 uAppBase 会剩一个空 map 头，还原成 uAppBase: {}（xcodegen 不接受 null）
+function collapseEmptyUAppBase(content) {
+  const lines = content.split('\n')
+  const idx = lines.findIndex((line) => /^ {4}uAppBase:\s*$/.test(line))
+  if (idx === -1) return content
+  let end = idx + 1
+  while (end < lines.length && !/^ {0,4}\S/.test(lines[end])) end++
+  const hasChild = lines.slice(idx + 1, end).some((line) => /^ {8}\S/.test(line))
+  if (hasChild) return content
+  lines.splice(idx, end - idx, '    uAppBase: {}')
+  return lines.join('\n')
+}
+
+function updateIOSCustomYml({ groups }) {
   const customFile = path.join($G.appDir, 'config/custom.yml')
   if (!fs.existsSync(customFile)) return
 
@@ -1838,26 +2117,46 @@ function updateIOSCustomYml({ dependencies, sources }) {
   const markerStart = '        # >>> uapp nativeplugins (自动生成, 勿手改)'
   const markerEnd = '        # <<< uapp nativeplugins'
 
-  const blocks = []
-  if (dependencies.length) blocks.push(`        dependencies:\n${dependencies.map((line) => `            ${line}`).join('\n')}`)
-  if (sources.length) blocks.push(`        sources:\n${sources.map((line) => `            ${line}`).join('\n')}`)
+  const renderGroups = (pick) => {
+    const blocks = groups
+      .filter((group) => (pick(group) || []).length)
+      .map(
+        (group) =>
+          `            ${uappMarkStart(group.name)}\n${pick(group)
+            .map((line) => `            ${line}`)
+            .join('\n')}\n            ${uappMarkEnd(group.name)}`
+      )
+    return blocks.length ? blocks.join('\n') : null
+  }
 
-  const generated = blocks.length ? `    uAppBase:\n${markerStart}\n${blocks.join('\n')}\n${markerEnd}` : '    uAppBase: {}'
+  const dependenciesBlock = renderGroups((group) => group.dependencies)
+  const sourcesBlock = renderGroups((group) => group.sources)
+  const sections = []
+  if (dependenciesBlock) sections.push(`        dependencies:\n${dependenciesBlock}`)
+  if (sourcesBlock) sections.push(`        sources:\n${sourcesBlock}`)
+
+  const generated = sections.length ? `    uAppBase:\n${markerStart}\n${sections.join('\n')}\n${markerEnd}` : '    uAppBase: {}'
   const startMarkerIndex = content.indexOf(markerStart)
 
   if (startMarkerIndex !== -1) {
     const endMarkerIndex = content.indexOf(markerEnd, startMarkerIndex)
     const headerIndex = content.lastIndexOf('    uAppBase:', startMarkerIndex)
     if (endMarkerIndex === -1 || headerIndex === -1) {
-      console.log(chalk.yellow('config/custom.yml 的原生插件标记块不完整，已跳过写入'))
+      console.log(chalk.yellow('config/custom.yml 的模块/原生插件标记块不完整，已跳过写入'))
       return
     }
     content = content.slice(0, headerIndex) + generated + content.slice(endMarkerIndex + markerEnd.length)
-  } else if (/^ {4}uAppBase:\s*\{\}\s*$/m.test(content)) {
-    content = content.replace(/^ {4}uAppBase:\s*\{\}\s*$/m, () => generated)
   } else {
-    console.log(chalk.yellow('config/custom.yml 的 targetTemplates.uAppBase 已被自定义，未写入原生插件依赖'))
-    return
+    if (/^ {4}uAppBase:\s*\{\}\s*$/m.test(content)) {
+      content = content.replace(/^ {4}uAppBase:\s*\{\}\s*$/m, '    uAppBase:')
+    }
+    const merged = mergeIntoUAppBase(content, groups)
+    if (merged === null) {
+      console.log(chalk.yellow('config/custom.yml 的 targetTemplates.uAppBase 已被自定义，未写入模块/原生插件依赖'))
+      return
+    }
+    if (merged.added) console.log(`✅ 已合并 ${merged.added} 条模块/原生插件依赖到 config/custom.yml`)
+    content = collapseEmptyUAppBase(merged.content)
   }
 
   fs.writeFileSync(customFile, content.endsWith('\n') ? content : `${content}\n`)
@@ -1966,9 +2265,42 @@ function updateIOSUniplugins(plistFile, plugins) {
   }
 }
 
+// 放在构建流程最后打印，避免被 xcodegen / xcodebuild 的输出冲掉
+function printIOSModuleNotice() {
+  const notice = $G.iosModuleNotice
+  if (!notice) return
+  $G.iosModuleNotice = null
+  if (notice.warnings.length) notice.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
+  if (notice.added.length) {
+    console.log(`✅ feature.plist 已注册模块：${notice.added.join(', ')}`)
+  } else {
+    console.log('✅ iOS 模块依赖与 feature.plist 均已是最新')
+  }
+}
+
 function updateIOSNativePlugins(plistFile) {
   const plugins = getIOSNativePlugins()
-  updateIOSCustomYml(buildIOSNativePluginYml(plugins))
+  const moduleYml = buildIOSModuleYml({
+    modules: $G.manifest['app-plus']?.modules,
+    sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
+    privacyDescription: $G.manifest['app-plus']?.distribute?.ios?.privacyDescription,
+    appDir: $G.appDir,
+  })
+  if (moduleYml.errors.length) {
+    moduleYml.errors.forEach((error) => console.log(chalk.red(error)))
+    console.log(chalk.red('❌ iOS 模块缺少隐私描述，打包中止'))
+    process.exit(1)
+  }
+  updateIOSCustomYml(mergeIOSYml(moduleYml, buildIOSNativePluginYml(plugins)))
+  const featurePatch = patchFeaturePlist({
+    plistPath: path.join($G.appDir, 'SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist'),
+    modules: $G.manifest['app-plus']?.modules,
+    sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
+  })
+  $G.iosModuleNotice = {
+    warnings: [...moduleYml.warnings, ...featurePatch.warnings],
+    added: featurePatch.added,
+  }
   updateIOSUniplugins(plistFile, plugins)
   if (!plugins.length) return
 

@@ -450,6 +450,88 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - 数组和逗号分隔字符串都支持
 - 不配（或全是识别不了的值）时保持模板原值（模板是四个方向全开），只支持竖屏的项目一定要配，否则离线包仍然是四方向
 
+### 🧩 iOS 模块依赖（modules）
+
+官方说明 `app-plus.modules` 仅云打包生效，离线打包需要自己往原生工程加依赖。uapp 在 iOS 构建时会读取 `modules`，把对应依赖写进 `config/custom.yml` 的 `targetTemplates.uAppBase`（按模块名写进 `# <模块名>-start` 标记块；`uAppBase` 已被手写内容占用时只合并、不覆盖，见下文）：
+
+```json5
+{
+  "app-plus": {
+    "modules": { "Camera": {}, "Push": {} },
+    "distribute": {
+      "sdkConfigs": { "push": { "unipush": { "version": "2", "offline": true } } }
+    }
+  }
+}
+```
+
+- 基础模块：`Barcode`、`Bluetooth`、`Camera`、`Contact`、`FaceID`、`Fingerprint`、`iBeacon`、`LivePusher`、`Messaging`、`Record`、`SQLite`、`UIWebview`、`VideoPlayer`、`Orientation`
+- 三方模块按 `sdkConfigs` 的平台子键选依赖：`Geolocation`（`geolocation`）、`Maps`（`maps`）、`OAuth`（`oauth`）、`Payment`（`payment`）、`Push`（`push`）、`Share`（`share`）、`Speech`（`speech`）、`Statistic`（`statics`）
+- 三方模块启用了但 `sdkConfigs` 没配平台，或平台没有对应映射时只告警，不猜依赖
+- `Push` 只处理 iOS 需要的部分：`push.igexin`（个推，在线推送）始终写入；`push.unipush`（uniPush 2.0）只有 `offline: true`（勾了离线推送）才写 iOS 原生依赖，仅在线推送时用 jssdk 不集成原生 SDK；`push.fcm`（谷歌推送）iOS 直接忽略；uniPush 未勾离线推送时会提醒 base.yml 仍带 UniPush 依赖
+- 依赖清单来自 DCloud 官方 [iOS 模块配置文档](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html)；高德地图按官方「仅 nvue 页面支持」使用 `DCUniMap` 套件
+- 动态 framework（如 `GoogleSignIn`、`Stripe*`）自动 `embed` + `codeSign`，静态库不 embed
+- SDK 里找不到的库 / 资源会告警并跳过；`base.yml` / `custom.yml` 已有的依赖不重复写入
+- **隐私描述必填**：模块启用后必须在 `app-plus.distribute.ios.privacyDescription` 里配置对应键，缺失时打包直接失败并列出缺的键：
+
+  | 模块 | 需要的键 |
+  | --- | --- |
+  | `Barcode` | `NSCameraUsageDescription` |
+  | `Bluetooth` / `iBeacon` | `NSBluetoothPeripheralUsageDescription`、`NSBluetoothAlwaysUsageDescription` |
+  | `Camera` | `NSCameraUsageDescription`、`NSPhotoLibraryUsageDescription`、`NSPhotoLibraryAddUsageDescription`、`NSMicrophoneUsageDescription` |
+  | `Contact` | `NSContactsUsageDescription` |
+  | `FaceID` | `NSFaceIDUsageDescription` |
+  | `LivePusher` | `NSCameraUsageDescription`、`NSMicrophoneUsageDescription` |
+  | `Record` / `Speech` | `NSMicrophoneUsageDescription` |
+  | `Geolocation` | `NSLocationWhenInUseUsageDescription` |
+  | `Maps` | `NSLocationWhenInUseUsageDescription`、`NSLocationAlwaysAndWhenInUseUsageDescription` |
+
+- `statics.google`（Firebase Analytics）需要工程里自带 `GoogleService-Info.plist`，uapp 只提醒不生成
+- **业务参数**：各平台在 `sdkConfigs` 里必须填的 iOS 参数会检查，缺了只告警（库能链接但运行时会失败）：
+  `oauth.weixin` / `oauth.qq` / `oauth.facebook` / `payment.weixin` / `share.weixin` / `share.qq` 需要 `appid`；`oauth.sina` / `share.sina` 需要 `appkey`、`redirect_uri`；`oauth.google` 需要 `clientid`；`payment.paypal` / `payment.stripe` 需要 `returnURL_ios`；`speech.baidu` 需要 `appid`、`apikey`、`secretkey`；`geolocation.*` / `maps.*` / `statics.umeng` 需要 `appkey_ios`；`maps.google` 需要 `APIKey_ios`；`statics.google` 需要 `config_ios`
+- **宏定义 / LinkerFlags**：`config/base.yml` 缺 `OTHER_LDFLAGS: -ObjC` 或缺 `GCC_PREPROCESSOR_DEFINITIONS` 时告警；官方没有「模块 → 宏」对照表，具体值按 [common.html](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html) 手动补
+
+### 📦 iOS 模块注册（feature.plist）
+
+`PandoraApi.bundle/feature.plist` 是 PDRCore 的插件注册表：**只有在这里登记过的模块，对应的 `plus.xxx` 对象才会被注入**。离线 SDK 自带的 `feature.plist` 只有 25 个基础 key，HBuilderX 标准基座是 44 个——差的就是业务模块。
+
+云打包由 DCloud 服务端按 `modules` 自动补节点，所以云打包不会踩这个坑；离线打包/自定义基座没有这一步，表现是**库都链接了、权限也声明了，但运行时仍提示「打包时未添加XX模块」**（例如 `plus.gallery` 报「未打包相册模块」）。
+
+uapp 在 iOS 构建时按 `modules` + `sdkConfigs` 自动补缺失节点，已存在的节点不覆盖，重复打包幂等：
+
+| manifest 模块 | 补的 feature.plist key | class |
+| --- | --- | --- |
+| `Barcode` | `barcode` | `PGBarcode` |
+| `Bluetooth` | `Bluetooth` | `libBlueTooth` |
+| `Camera` | `Camera` + `Gallery` | `PGCamera` / `PGGallery` |
+| `Contact` | `Contacts` | `PGContacts` |
+| `Fingerprint` | `fingerprint` | `Fingerprint` |
+| `Geolocation` | `Geolocation` | `PGGeolocation` |
+| `iBeacon` | `iBeacon` | `PGBeacon` |
+| `LivePusher` | `LivePusher` | `PGLivePush` |
+| `Maps` | `Maps` | `PGMap` |
+| `Messaging` | `Messaging` | `PGMessaging` |
+| `Payment` | `Payment` | `PGPlatbyManager` |
+| `Record` | `Record` | `PGRecord` |
+| `Share` | `Share` | `PGShareManager` |
+| `Speech` | `Speech` | `PGSpeech` |
+| `Statistic` | `Statistic` | `UmengStatistic` |
+
+- `Camera` 会同时补 `Gallery`：`uni.chooseImage` 在 App 端调的是 `plus.gallery.pick()`，只声明 `Camera` 不够
+- `Push`、`SQLite`、`VideoPlayer`、`Orientation` 离线 SDK 已内置，不补；`FaceID`、`UIWebview` 没有独立节点
+- `sdkConfigs.oauth` 的平台写进 `OAuth` → `extend`（`apple`、`google` 已内置）：
+
+  | provider | extend key | class |
+  | --- | --- | --- |
+  | `weixin` | `weixin` | `PGWXOauth` |
+  | `qq` | `qq` | `PGQQOauth` |
+  | `sina` | `weibo` | `PGSinaWBOauth` |
+  | `univerify` | `univerify` | `PGUniVerify` |
+  | `facebook` | `facebook` | `PGFBOauth` |
+
+- 写入位置是 `SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist`。工程里的 `SDKs/SDK` 是指向 SDK 目录的软链，所以补丁会落到 `~/.uappsdk/ios/SDK`，**本机所有项目共用**；换 SDK 版本后下次打包会自动再补。PDRCore 对未链接的模块会跳过，多注册不影响运行
+- 模块相关的告警和 `✅ feature.plist 已注册模块：Camera, Gallery` 会在构建流程末尾（xcodebuild 之后）统一输出，不会被编译日志冲掉；没有新增时会输出 `✅ iOS 模块依赖与 feature.plist 均已是最新`。`plutil` 不可用（非 macOS）或文件缺失时告警并跳过
+
 ### 🧩 iOS 原生插件（nativePlugins）
 
 离线打包时，uapp 会按 manifest 里启用的原生插件同步插件配置：
@@ -472,7 +554,30 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - `frameworks` 里的系统库（`UIKit.framework`、`libz.tbd` 等）写成 `- sdk:`，插件目录里的第三方库写成 `- framework:`；`embedFrameworks` 里的会 `embed` + `codeSign`
 - 插件 `ios` 根目录下的 `.a` / `.framework` / `.xcframework` 自动加入（与云打包一致）
 - `resources` / `assets` 写成 `buildPhase: resources`，无扩展名的目录补 `type: folder`
-- 以上依赖写进 `config/custom.yml` 的 `targetTemplates.uAppBase`，用 `# >>> uapp nativeplugins` 标记块管理，每次构建整块重写；插件全关掉会还原成 `uAppBase: {}`
+- 以上依赖写进 `config/custom.yml` 的 `targetTemplates.uAppBase`，**每个模块/插件单独一个标记块**（注释就是模块名），分别包在 `dependencies` / `sources` 列表里：
+
+  ```yaml
+  targetTemplates:
+      uAppBase:
+          dependencies:
+              - sdk: SafariServices.framework      # 手写的，保留
+              # Camera-start (自动生成, 勿手改)
+              - framework: SDKs/SDK/Libs/liblibCamera.a
+                embed: false
+              - sdk: AssetsLibrary.framework
+              # Camera-end
+              # OAuth.google-start (自动生成, 勿手改)
+              - framework: SDKs/SDK/Libs/libGoogleOauth.a
+                embed: false
+              # OAuth.google-end
+  ```
+
+  - 块名规则：普通模块用 manifest 里的模块名（`Camera`）；`sdkConfigs` 的平台用 `模块.平台`（`OAuth.google`、`Maps.baidu`）；原生插件用插件标识（`sn-adjust1`）
+  - 标记块内每次构建**整块重写**：关掉模块/插件后对应块自动移除，块空了连标记一起删
+  - 标记块外的手写内容不动；按库文件名（`- sdk:` / `- framework:` / `- path:` 的值取 basename）去重，已手写的不重复加
+  - 只有带 `(自动生成, 勿手改)` 后缀的 `-start` 注释才被认作 uapp 的块，手写的 `# apple登录-start` 之类不受影响
+  - 如果已经有手写的插件块 `# <插件标识>原生插件-start` / `-end`（HBuilderX 原生插件市场生成的写法），uapp **不新建块**，只把该插件缺的依赖追加到这个块的 `-end` 前；块里已有的条目原样保留
+  - 重复运行幂等，只有真正新增条目时提示 `✅ 已合并 N 条模块/原生插件依赖到 config/custom.yml`
 - `privacies` 声明的隐私键若在最终 `Info.plist` 里缺失，会提示到 `app-plus.distribute.ios.privacyDescription` 补齐
 - `base.yml` 里已有的系统库不会重复写入（重复依赖会让 xcodegen 丢掉其他 framework 依赖）
 - 暂不支持：`capabilities.entitlements`、`deploymentTarget`、`validArchitectures`
