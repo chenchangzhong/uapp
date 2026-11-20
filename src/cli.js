@@ -1041,6 +1041,20 @@ function androidPermissionName(entry) {
   return match ? match[0] : ''
 }
 
+// manifest 的 permissions 里可以带 android:maxSdkVersion / tools:ignore 等属性, 取原始标签而不是按名字重建
+function androidPermissionTag(entry, name) {
+  const tag = /<uses-permission\b[^>]*\/>/.exec(String(entry || ''))
+  if (!tag || !new RegExp(`android:name="${escapeRe(name)}"`).test(tag[0])) return `<uses-permission android:name="${name}" />`
+  return tag[0].replace(/\s+/g, ' ').replace(/\s*\/>$/, ' />')
+}
+
+// 解析 <uses-permission ... /> 里的属性, 保持出现顺序
+function permissionAttrs(text) {
+  const attrs = new Map()
+  for (const [, key, value] of String(text).matchAll(/([A-Za-z][A-Za-z0-9_:.-]*)="([^"]*)"/g)) attrs.set(key, value)
+  return attrs
+}
+
 // manifest 的 app-plus.distribute.android.permissions / excludePermissions / schemes -> AndroidManifest.xml
 // permissions 只增不删 (工程里手工加的权限保留), excludePermissions 用 tools:node="remove" 排除
 function updateAndroidManifest() {
@@ -1107,10 +1121,34 @@ function updateAndroidManifest() {
   }
 
   let addedPermissions = 0
+  let syncedPermissions = 0
   permissions.forEach((entry) => {
     const name = androidPermissionName(entry)
-    if (!name || hasPermission(name)) return
-    insertPermissionLine(`<uses-permission android:name="${name}" />`)
+    if (!name) return
+    const tag = androidPermissionTag(entry, name)
+    const declaredRe = new RegExp(`<uses-permission[^>]*android:name="${escapeRe(name)}"[^>]*/>`)
+    const declared = declaredRe.exec(content)
+    if (declared) {
+      // 工程里已有同名行: manifest 里显式声明的属性值优先覆盖, 没声明的属性(手工加的 tools:ignore 等)保留
+      if (/tools:node="remove"/.test(declared[0])) return
+      const wanted = permissionAttrs(tag)
+      const merged = permissionAttrs(declared[0])
+      let changed = false
+      wanted.forEach((value, key) => {
+        if (key === 'android:name' || key === 'tools:node') return
+        if (merged.get(key) !== value) {
+          merged.set(key, value)
+          changed = true
+        }
+      })
+      if (changed) {
+        const line = `<uses-permission ${[...merged].map(([key, value]) => `${key}="${value}"`).join(' ')} />`
+        content = content.replace(declaredRe, () => line)
+        syncedPermissions++
+      }
+      return
+    }
+    insertPermissionLine(tag)
     addedPermissions++
   })
 
@@ -1152,7 +1190,9 @@ function updateAndroidManifest() {
     const declared = declaredRe.exec(content)
     if (declared) {
       if (/tools:node="remove"/.test(declared[0])) return
-      content = content.replace(declaredRe, `<uses-permission android:name="${name}" tools:node="remove" />`)
+      // 保留原行的其它属性(如 maxSdkVersion / tools:ignore), 只追加 tools:node="remove"
+      const removed = declared[0].replace(/\s*\/>$/, ' tools:node="remove" />')
+      content = content.replace(declaredRe, () => removed)
       excludedPermissions++
       return
     }
@@ -1198,7 +1238,7 @@ function updateAndroidManifest() {
   if (content === original) return
 
   fs.writeFileSync(manifestFile, content)
-  console.log(`✅ updateAndroidManifest (permissions: +${addedPermissions}, module: +${addedModulePermissions}, feature: +${addedUsesFeatures}, exclude: ${excludedPermissions}, schemes: +${addedSchemes})`)
+  console.log(`✅ updateAndroidManifest (permissions: +${addedPermissions}, synced: ${syncedPermissions}, module: +${addedModulePermissions}, feature: +${addedUsesFeatures}, exclude: ${excludedPermissions}, schemes: +${addedSchemes})`)
 }
 
 function updateAndroidIcons(resDir) {

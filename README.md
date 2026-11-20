@@ -615,8 +615,8 @@ uapp 在 iOS 构建时按 `modules` + `sdkConfigs` 自动补缺失节点，已�
 ```
 
 - `minSdkVersion` / `targetSdkVersion` 写入 `app/build.gradle` 的 `minSdk` / `targetSdk`（也兼容 `minSdkVersion` 写法）
-- `permissions` **只增不删**：工程里手工加的权限保留，已经存在的不重复写入
-- `excludePermissions` 写成 `tools:node="remove"`，避免被依赖库的 manifest 合并回来；已在工程里的普通声明会被改写成 remove
+- `permissions` **只增不删**：工程里手工加的权限保留，已经存在的不重复写入；条目里写的 `android:maxSdkVersion` / `tools:ignore` 等属性原样带入工程，工程里已有同名行时 manifest 里显式声明的属性值优先覆盖（改 `maxSdkVersion="32"`→`"33"` 再跑一次即生效），manifest 没声明的属性保留
+- `excludePermissions` 写成 `tools:node="remove"`，避免被依赖库的 manifest 合并回来；已在工程里的普通声明会被改写成 remove，并保留该行原有的其它属性
 - `schemes` 写到每个带 `VIEW` intent-filter 的 activity（`PandoraEntry`、`PandoraEntryActivity`），已存在的 scheme 不重复写
 - 没配的字段不动工程文件；`android.abiFilters`、`android.manifest` 暂不支持
 
