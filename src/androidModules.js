@@ -472,7 +472,9 @@ export function updateAndroidModuleLibs({ appDir, sdkHomeDir, modules, sdkConfig
  * 节点全部从 SDK 自带的 dcloud_properties.xml 提取，缺的才写入工程文件，幂等。
  */
 export const MODULE_FEATURES = {
-  Camera: ['Camera'],
+  // 官方 others.html 的章节标题就是「Camera（相机/相册）」：拍照存相册、相机里选相册都要 plus.gallery，
+  // 只注册 Camera 会让 plus.gallery 不存在（调用时报「打包时未添加 Gallery 模块」）
+  Camera: ['Camera', 'Gallery'],
   VideoPlayer: ['VideoPlayer'],
   Barcode: ['Barcode'],
   Bluetooth: ['Bluetooth'],
