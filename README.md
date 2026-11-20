@@ -480,7 +480,8 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - 基础模块：`Barcode`、`Bluetooth`、`Camera`、`Contact`、`FaceID`、`Fingerprint`、`iBeacon`、`LivePusher`、`Messaging`、`Record`、`SQLite`、`UIWebview`、`VideoPlayer`、`Orientation`
 - 三方模块按 `sdkConfigs` 的平台子键选依赖：`Geolocation`（`geolocation`）、`Maps`（`maps`）、`OAuth`（`oauth`）、`Payment`（`payment`）、`Push`（`push`）、`Share`（`share`）、`Speech`（`speech`）、`Statistic`（`statics`）
 - 三方模块启用了但 `sdkConfigs` 没配平台，或平台没有对应映射时只告警，不猜依赖
-- `Push` 只处理 iOS 需要的部分：`push.igexin`（个推，在线推送）始终写入；`push.unipush`（uniPush 2.0）只有 `offline: true`（勾了离线推送）才写 iOS 原生依赖，仅在线推送时用 jssdk 不集成原生 SDK；`push.fcm`（谷歌推送）iOS 直接忽略；uniPush 未勾离线推送时会提醒 base.yml 仍带 UniPush 依赖
+- `Push` 只处理 iOS 需要的部分：`push.igexin`（个推，在线推送）始终写入；`push.unipush`（uniPush 2.0）只有 `offline: true`（勾了离线推送）才写 iOS 原生依赖，仅在线推送时用 jssdk 不集成原生 SDK；`push.fcm`（谷歌推送，官方「Google Cloud Message 3.3.7+」独立集成）写 `liblibPush.a`+`libFCMPush.a`+`FirebaseCore`/`FirebaseCoreInternal`/`FirebaseInstallations`/`GoogleDataTransport`/`GoogleUtilities`/`FBLPromises`/`nanopb`/`FirebaseMessaging` 各 xcframework+`UserNotifications.framework`，工程根目录缺 `GoogleService-Info.plist` 时告警；uniPush 未勾离线推送时会提醒 base.yml 仍带 UniPush 依赖
+- iOS 的 FCM 与 Android 不同：Android 勾「离线推送 → Google FCM推送SDK」写的是 `push.unipush.fcm`（厂商通道，要与普通 uniPush 二选一），iOS 的 FCM 是 `sdkConfigs.push.fcm` 这个独立平台，三种推送（uniPush / 个推 / FCM）按官方文档各自独立，可并列；`push.unipush.fcm` 这种嵌套键在 iOS 侧不参与依赖计算
 - 依赖清单来自 DCloud 官方 [iOS 模块配置文档](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html)；高德地图按官方「仅 nvue 页面支持」使用 `DCUniMap` 套件
 - 动态 framework（如 `GoogleSignIn`、`Stripe*`）自动 `embed` + `codeSign`，静态库不 embed
 - SDK 里找不到的库 / 资源会告警并跳过；`base.yml` / `custom.yml` 已有的依赖不重复写入

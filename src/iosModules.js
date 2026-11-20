@@ -233,9 +233,6 @@ const PUSH_SDKS = [
   'CoreLocation.framework', 'AVFoundation.framework', 'CoreTelephony.framework',
 ]
 
-// iOS 不需要谷歌推送（FCM）
-const IGNORED_PUSH_PROVIDERS = new Set(['fcm'])
-
 const SDK_CONFIG_DEPS = {
   geolocation: {
     system: {
@@ -371,6 +368,17 @@ const SDK_CONFIG_DEPS = {
       libs: ['liblibPush.a', 'libUniPush.a', 'GTSDK.xcframework'],
       sdks: PUSH_SDKS,
       offlineOnly: true,
+    },
+    // 谷歌推送（官方 iOS push.html「Google Cloud Message 3.3.7+ 新增」）：与 uniPush/个推并列的独立集成，
+    // 依赖 libFCMPush.a + Firebase 系列 xcframework，资源只有 GoogleService-Info.plist（工程自带）
+    fcm: {
+      libs: [
+        'liblibPush.a', 'libFCMPush.a',
+        'FirebaseCore.xcframework', 'FirebaseCoreInternal.xcframework', 'FirebaseInstallations.xcframework',
+        'GoogleDataTransport.xcframework', 'GoogleUtilities.xcframework', 'FBLPromises.xcframework',
+        'nanopb.xcframework', 'FirebaseMessaging.xcframework',
+      ],
+      sdks: ['UserNotifications.framework'],
     },
   },
   share: {
@@ -640,7 +648,6 @@ export function buildIOSModuleYml({ modules, sdkConfigs, privacyDescription, app
     }
 
     providers.forEach((provider) => {
-      if (configKey === 'push' && IGNORED_PUSH_PROVIDERS.has(provider)) return
       const label = `模块 ${moduleKey} (${configKey}.${provider})`
       const dep = SDK_CONFIG_DEPS[configKey]?.[provider]
       if (!dep) {
@@ -650,6 +657,9 @@ export function buildIOSModuleYml({ modules, sdkConfigs, privacyDescription, app
       warnings.push(...checkBusinessParams(configKey, provider, config[provider], label))
       if (configKey === 'statics' && provider === 'google') {
         warnings.push(`模块 ${moduleKey} (${configKey}.${provider}) 需要工程自带 GoogleService-Info.plist，uapp 不会生成`)
+      }
+      if (configKey === 'push' && provider === 'fcm' && !fs.existsSync(path.join(appDir, 'GoogleService-Info.plist'))) {
+        warnings.push(`模块 ${moduleKey} (${configKey}.${provider}) 需要在工程根目录放 Firebase 的 GoogleService-Info.plist，uapp 不会生成`)
       }
       // uniPush 2.0 仅在线推送时不集成个推原生 SDK
       if (dep.offlineOnly && config[provider]?.offline !== true) {
