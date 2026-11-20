@@ -47,6 +47,17 @@ export const MODULE_SDK_CONFIG = {
   Statistic: 'statics',
 }
 
+// 「离线推送」勾了 Google FCM推送SDK（manifest 写作 push.unipush.fcm）时走官方 push.html「谷歌推送」那套：
+// 必须用 aps-unipush-gp-release.aar，且官方明确「不要和上文的 UniPush 混为一谈，即此配置与上文 UniPush 一同配置时会编译冲突」，
+// 所以勾了 FCM 就整套替换，不写普通 uniPush 的 aps-unipush-release.aar
+export const PUSH_UNIPUSH_FCM_AARS = [
+  'aps-release.aar',
+  'aps-unipush-gp-release.aar',
+  'sdk-for-gj-*.aar',
+  'aps-igexin-fcm-release.aar',
+  'fcm-*.aar',
+]
+
 export const SDK_CONFIG_AARS = {
   geolocation: {
     system: [], // 系统定位在 lib.5plus.base 内
@@ -268,11 +279,17 @@ export function buildAndroidModuleLibs({ modules, sdkConfigs, sdkLibsDir, gradle
   const warnings = []
   const errors = []
   const seen = new Set()
+  // 老模板 build.gradle 是 `new File('sdk.libs').eachLine { implementation files(...) }`，按文件名原样读，通配符不生效；
+  // 映射表里的通配符（如 fcm-*.aar）在本机 SDK libs 里能定位到具体文件时就写成具体文件名
+  const sdkLibFiles = sdkLibsDir && fs.existsSync(sdkLibsDir) ? fs.readdirSync(sdkLibsDir) : null
 
   const add = (file, label) => {
-    if (seen.has(file)) return
-    seen.add(file)
-    lines.push(file)
+    const expanded = sdkLibFiles && file.includes('*') ? sdkLibFiles.filter((name) => matchPattern(file, name)).sort() : []
+    for (const name of expanded.length ? expanded : [file]) {
+      if (seen.has(name)) continue
+      seen.add(name)
+      lines.push(name)
+    }
   }
 
   const addModule = (moduleKey, files, label) => {
@@ -324,7 +341,9 @@ export function buildAndroidModuleLibs({ modules, sdkConfigs, sdkLibsDir, gradle
       const value = config[provider]
       if (value === undefined || value === null || typeof value !== 'object') continue
       const label = `模块 ${moduleKey} (${configKey}.${provider})`
-      const files = table?.[provider]
+      // uniPush 勾了 FCM 厂商通道时用谷歌推送那套 aar（见 PUSH_UNIPUSH_FCM_AARS），不支持与普通 uniPush 并存
+      const unipushFcm = configKey === 'push' && provider === 'unipush' && Boolean(value.fcm)
+      const files = unipushFcm ? PUSH_UNIPUSH_FCM_AARS : table?.[provider]
       if (!files) {
         // apple/appleiap 仅 iOS；system 等空映射已列出；真正未知的提示出来
         if (!['apple', 'appleiap'].includes(provider) && !(provider in (table || {}))) {
@@ -334,7 +353,8 @@ export function buildAndroidModuleLibs({ modules, sdkConfigs, sdkLibsDir, gradle
       }
       files.forEach((file) => add(file, label))
       checkFiles(files, label)
-      const maven = SDK_CONFIG_MAVEN[configKey]?.[provider]
+      // 谷歌推送那套的个推 SDK 已打包在 sdk-for-gj aar 内，官方只要求 google-services 插件 + firebase-messaging（由 fcm 厂商提示给出）
+      const maven = unipushFcm ? null : SDK_CONFIG_MAVEN[configKey]?.[provider]
       // app/build.gradle 里已经写了（按关键字检索）就不提示
       if (maven && !(gradleContent && gradleContent.toLowerCase().includes(maven.match.toLowerCase()))) {
         warnings.push(`${label} 还需要第三方依赖：${maven.hint}，请手动添加到 app/build.gradle`)
@@ -351,7 +371,9 @@ export function buildAndroidModuleLibs({ modules, sdkConfigs, sdkLibsDir, gradle
             continue
           }
           if (!(gradleContent && gradleContent.toLowerCase().includes(vendorMaven.match.toLowerCase()))) {
-            warnings.push(`${vendorLabel} 还需要第三方依赖：${vendorMaven.hint}，请手动添加到 app/build.gradle（根目录 build.gradle 需加个推 maven 仓 https://mvn.getui.com/nexus/content/repositories/releases）`)
+            // 谷歌推送（fcm）只需 google-services 插件 + firebase-messaging，个推 SDK 已打进 sdk-for-gj aar，不需要个推 maven 仓
+            const repoHint = vendor === 'fcm' ? '' : '（根目录 build.gradle 需加个推 maven 仓 https://mvn.getui.com/nexus/content/repositories/releases）'
+            warnings.push(`${vendorLabel} 还需要第三方依赖：${vendorMaven.hint}，请手动添加到 app/build.gradle${repoHint}`)
           }
         }
       }
@@ -406,17 +428,24 @@ export function updateAndroidModuleLibs({ appDir, sdkHomeDir, modules, sdkConfig
   const knownPatterns = [
     ...Object.values(MODULE_AARS).flat(),
     ...Object.values(SDK_CONFIG_AARS).flatMap((table) => Object.values(table)).flat(),
+    ...PUSH_UNIPUSH_FCM_AARS,
   ]
   const knownSet = new Set(knownPatterns.filter((p) => !p.includes('*')))
   const knownGlobs = knownPatterns.filter((p) => p.includes('*'))
   const isKnown = (name) => knownSet.has(name) || knownGlobs.some((p) => matchPattern(p, name))
 
   const neededSet = new Set(needed)
+  // needed 里的通配符（如 fcm-*.aar）：工程里已写了具体文件（fcm-3.1.2.aar）就算已满足，不把它改写成通配符
+  const satisfiesNeeded = (name) => neededSet.has(name) || needed.some((p) => p.includes('*') && matchPattern(p, name))
+  const coveredBy = (list, pattern) => list.some((line) => {
+    const t = line.trim()
+    return Boolean(t) && (t === pattern || (pattern.includes('*') && matchPattern(pattern, t)))
+  })
   const removed = []
   const outLines = rawLines.filter((line) => {
     const t = line.trim()
     if (!t) return true
-    if (neededSet.has(t)) return true
+    if (satisfiesNeeded(t)) return true
     // 映射表认识、但已不被任何勾选模块需要 → 确认无用，直接删
     if (isKnown(t)) {
       removed.push(t)
@@ -427,8 +456,8 @@ export function updateAndroidModuleLibs({ appDir, sdkHomeDir, modules, sdkConfig
   })
   const outSet = new Set(outLines.map((line) => line.trim()).filter(Boolean))
   const originalSet = new Set(rawLines.map((line) => line.trim()).filter(Boolean))
-  const appended = needed.filter((line) => !outSet.has(line))
-  const added = needed.filter((line) => !originalSet.has(line))
+  const appended = needed.filter((line) => !outSet.has(line) && !coveredBy(rawLines, line))
+  const added = needed.filter((line) => !originalSet.has(line) && !coveredBy(rawLines, line))
   const outText = [...outLines, ...appended].join('\n') + (endsNL ? '\n' : '')
   // 内容无变化时不动文件（避免无意义的 mtime/git 抖动）
   if (outText !== raw) fs.writeFileSync(libsFile, outText)
