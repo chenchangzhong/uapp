@@ -7,8 +7,10 @@
   "versionCode": "1000000",
   "uapp": {
     "package": "com.code0xff.uapp",
+    "android.appid": "android 的 appid (选填, 未填回退根节点 appid)",
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
     "ios": {
+      "appid": "ios 的 appid (选填, 未填回退根节点 appid)",
       "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
       "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey", "googleClientId": "test 包的 google client id" },
       "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }

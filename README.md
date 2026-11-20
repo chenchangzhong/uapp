@@ -139,9 +139,12 @@ uapp new YourProject
   "versionCode": "100",
   "uapp": {
     "package": "com.code0xff.uapp",
+    // 分平台 appid (选填), 未填时逐级回退: uapp.appid -> 根节点 appid
+    "android.appid": "android 的 appid",
     "android.appkey": "申请并替换为 android dcloudkey",
     "ios": {
       // base / release 必填; test / sim 未填的字段回退 base
+      "appid": "ios 的 appid (选填, 未填回退根节点 appid)",
       "base": { "package": "com.code0xff.uapp", "appkey": "base 的 dcloudkey" },
       // test / sim 可只填部分字段, 也可整个节点省略 (全部回退 base)
       "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
@@ -308,8 +311,10 @@ uapp run build:app release
   "versionCode": "1000000",
   "uapp": {
     "package": "com.code0xff.uapp",
+    "android.appid": "__UNI__ANDROID1",
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
     "ios": {
+      "appid": "__UNI__IOS1",
       "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
       "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey" },
       "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey" }
@@ -343,6 +348,12 @@ versionName, versionCode 如果需要平台差异化定义, 可以加前缀 andr
 
 应用名统一取根节点的 name, `uapp.name` / `uapp.<platform>.name` 已废弃（不再读取）.
 
+appid 支持分平台配置: `uapp.android.appid` / `uapp.ios.appid`.
+平台专属值没填时才逐级回退 `uapp.appid` -> 根节点 appid, 所以老工程不用改.
+写入范围: 本地打包资源目录 `unpackage/resources/<appid>/www`、
+`assets/apps/<appid>/www`（Android）与 `Main/Pandora/apps/<appid>/www`（iOS）、
+两侧 `control.xml` 的 `app appid`，以及 `uapp info` 的展示与后台链接.
+
 iOS 的 package / appkey 按构建类型写在 `uapp.ios.{base|test|sim|release}` 里:
 base / release 必填, test / sim 未填的字段回退 base（旧的 `ios.package` / `ios.appkey` 已废弃）.
 Google 登录的 iOS client id 也可以写在同一节点: 正式包不用填（沿用标准字段）,
@@ -362,6 +373,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 |:---------------|----------------------------------------------------------------------------------------|
 | name           | 已废弃, 不再读取。APP名字统一取根节点的 name（根 name 必填, 缺失时打包报错）                          |
 | package        | 应用的包名（Android 使用）。不同平台可以加前缀区分，如 android.package。iOS 见 uapp.ios.*                                 |
+| android.appid / ios.appid | (选填) 分平台 DCloud appid。没填时逐级回退 `uapp.appid` -> 根节点 `appid`，两个平台可各用一套 appid + appkey                       |
 | android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey，下方有申请地址                                           |
 | ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey, googleClientId }`。base / release 必填；test / sim 未填的字段回退 base。`googleClientId` 是 Google 登录的 iOS client id（正式包不填，沿用 `app-plus.distribute.sdkConfigs.oauth.google.clientid`）。`ios.test.export` 可选 `dev`(默认) / `release` / `own`，决定测试包用哪份导出配置 |
 | versionName    | App版本名，同上可以加前缀区分不同平台。如 android.versionName                                             |

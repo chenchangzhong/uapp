@@ -727,17 +727,15 @@ function loadManifest() {
     return
   }
 
-  if (!$G.manifest.appid) {
-    console.log(chalk.yellow('manifest.json 中缺少 appid，请打开 HBuilderX 获取'))
-  }
-
   if (!$G.manifest.uapp) {
     console.log(chalk.yellow('manifest.json 中缺少 uapp 节点，请复制并添加如下内容'))
     console.log(`
 "uapp": {
   "package": "com.code0xff.uapp",
+  "android.appid": "android 的 appid (选填, 未填回退根节点 appid)",
   "android.appkey": "申请并替换为 android dcloudkey",
   "ios": {
+    "appid": "ios 的 appid (选填, 未填回退根节点 appid)",
     "base": { "package": "com.code0xff.uapp", "appkey": "base 的 dcloudkey (必填)" },
     "test": { "package": "com.code0xff.uapp.test", "appkey": "test 的 dcloudkey (可选, 未填回退 base)" },
     "release": { "package": "com.code0xff.uapp", "appkey": "release 的 dcloudkey (必填)" }
@@ -763,6 +761,17 @@ function loadManifest() {
   } else {
     $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
     $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
+  }
+
+  // appid 支持分平台配置: uapp.android.appid / uapp.ios.appid。
+  // 平台专属值没填时才逐级回退: uapp.appid -> 根节点 appid。
+  const platformAppid = $G.projectType === 'ios'
+    ? $G.manifest.uapp.ios?.appid
+    : $G.manifest.uapp[`${$G.projectType}.appid`]
+  $G.manifest.uapp.appid = String(platformAppid || $G.manifest.uapp.appid || $G.manifest.appid || '').trim()
+  if (!$G.manifest.uapp.appid) {
+    console.log(chalk.yellow('manifest.json 中缺少 appid，请打开 HBuilderX 获取'))
+    console.log(chalk.yellow('也可以按平台配置 uapp.android.appid / uapp.ios.appid'))
   }
 }
 
@@ -873,10 +882,10 @@ function prepareCommand() {
     $G.projectType === 'ios' ? 'Main/Pandora/apps' : 'app/src/main/assets/apps'
   )
   if (buildType.includes('dev') || ['base', 'sim'].includes(buildType)) {
-    removeSync(path.join(embedAppsDir, $G.manifest.appid))
+    removeSync(path.join(embedAppsDir, $G.manifest.uapp.appid))
   } else {
     emptyDirSync(embedAppsDir)
-    sync(compiledDir, path.join(embedAppsDir, $G.manifest.appid, 'www'))
+    sync(compiledDir, path.join(embedAppsDir, $G.manifest.uapp.appid, 'www'))
     console.log(chalk.green('APP打包所需资源已更新'))
   }
 
@@ -2513,7 +2522,7 @@ function replaceControlXml(xmlFile) {
 
   let content = fs.readFileSync(xmlFile, 'utf8')
   let re = /(app appid=")(.+?)(")/g
-  content = content.replace(re, '$1' + $G.manifest.appid + '$3')
+  content = content.replace(re, '$1' + $G.manifest.uapp.appid + '$3')
   content = content.replace(/(<hbuilder[^>]*\bversion=")([^"]*)(")/i, '$1' + innerSDKVersion + '$3')
   // appver 是内置资源版本，跟 manifest.json 的 versionName 保持同步，不再手改
   let appver = normalizeVersionName($G.manifest.uapp.versionName)
@@ -2544,7 +2553,7 @@ function updateIOSIcons(resDir) {
 
 function printManifestInfo() {
   console.log()
-  console.log('- appid       : ' + $G.manifest.appid)
+  console.log('- appid       : ' + $G.manifest.uapp.appid)
   console.log('- appName     : ' + $G.manifest.uapp.name)
   if ($G.projectType === 'ios') {
     IOS_BUILD_TYPES.forEach((buildType) => {
@@ -2570,7 +2579,7 @@ function printManifestInfo() {
     ? `uapp.ios.${$G.args.argv.remain[2] || 'base'}.appkey`
     : `uapp.${$G.projectType}.appkey`
   console.log(`👇 DCloud 开发者后台配置 dcloud_appkey (${appkeyKey}): `)
-  console.log('https://dev.dcloud.net.cn/pages/app/detail/info?tab=package&appid=' + $G.manifest.appid)
+  console.log('https://dev.dcloud.net.cn/pages/app/detail/info?tab=package&appid=' + $G.manifest.uapp.appid)
   console.log()
 }
 
@@ -2777,7 +2786,7 @@ function getBuildOut() {
   let relativeDir = ''
 
   if (buildArg.startsWith('build:app')) {
-    relativeDir = 'unpackage/resources/' + $G.manifest.appid + '/www'
+    relativeDir = 'unpackage/resources/' + $G.manifest.uapp.appid + '/www'
   } else if (isDev) {
     relativeDir = 'unpackage/dist/dev/' + buildArg.split(':')[1]
   } else {
