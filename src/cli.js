@@ -21,6 +21,8 @@ import { readConfig, configCommand } from './config.js'
 import { buildIOSModuleYml, patchFeaturePlist } from './iosModules.js'
 import { updateAndroidModuleLibs, updateAndroidNativePluginLibs, updateAndroidUniplugins, updateAndroidPluginGradle, patchDcloudProperties, ANDROID_MODULE_PERMISSIONS, SDK_CONFIG_PERMISSIONS, ANDROID_MODULE_USES_FEATURES, ANDROID_SDK31_PERMISSIONS, MODULE_SDK_CONFIG, resolveAndroidTargetSdk } from './androidModules.js'
 import { updateAndroidUtsModules, buildIOSUtsYml } from './utsModules.js'
+import { isNativePluginPath, removeEmptyModuleDirectories } from './app-resources.js'
+import { printIOSSigningInfo } from './ios-signing.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -76,7 +78,10 @@ let $G = {
 
 export default function (inputArgs) {
   checkForUpdates()
-  let args = $G.args = nopt(knownOpts, shortHands, inputArgs)
+  // hbx/wx 后面是工具自己的参数：只解析前 3 个，避免 --help/--version 被 uapp 截获
+  // 约束：hbx/wx 必须是第一个位置参数（与上游一致）；此路径下 args.argv.original 只保留到命令名
+  const toolCommand = ['hbx', 'wx'].includes(inputArgs[2])
+  let args = $G.args = nopt(knownOpts, shortHands, toolCommand ? inputArgs.slice(0, 3) : inputArgs)
 
   if (args.version) {
     console.log('uapp 当前版本: ' + pkg.version)
@@ -173,11 +178,11 @@ export default function (inputArgs) {
   }
 
   if (cmd === 'hbx') {
-    return runHBuilderXCli(args.argv.original.slice(1))
+    return runHBuilderXCli(inputArgs.slice(3))
   }
 
   if (cmd === 'wx') {
-    return runWeixinCli(args.argv.original.slice(1))
+    return runWeixinCli(inputArgs.slice(3))
   }
 
   // 如果当面目录不存在 manifest.json，尝试使用 ../src/manifest.json
@@ -363,10 +368,21 @@ export default function (inputArgs) {
   $G.webAppDir = path.dirname(fs.realpathSync($G.localLinkManifest))
 
   // command: uapp info, uapp info jwt, uapp info key
-  if (cmd === 'info' && (!args.argv.remain[1] || args.argv.remain[1] === 'jwt' || args.argv.remain[1] === 'key')) {
+  if (cmd === 'info') {
+    const infoArg = args.argv.remain[1]
+    if (infoArg && !['jwt', 'key'].includes(infoArg)) {
+      process.exitCode = 1
+      return console.log(chalk.yellow('不支持的 info 参数。用法: uapp info、uapp info jwt、uapp info key'))
+    }
+
     printManifestInfo()
 
-    if (($G.projectType === 'ios' && !args.argv.remain[1]) || args.argv.remain[1] === 'jwt') {
+    // 仅 iOS 且未指定子命令时展示发行证书信息
+    if ($G.projectType === 'ios' && !infoArg) {
+      printIOSSigningInfo($G.appDir)
+    }
+
+    if (($G.projectType === 'ios' && !infoArg) || infoArg === 'jwt') {
       printJWTToken().then()
       return
     }
@@ -885,8 +901,13 @@ function prepareCommand() {
   if (buildType.includes('dev') || ['base', 'sim'].includes(buildType)) {
     removeSync(path.join(embedAppsDir, $G.manifest.uapp.appid))
   } else {
+    const embedWwwDir = path.join(embedAppsDir, $G.manifest.uapp.appid, 'www')
     emptyDirSync(embedAppsDir)
-    sync(compiledDir, path.join(embedAppsDir, $G.manifest.uapp.appid, 'www'))
+    // 原生插件源码（utssdk / app-android 等）由 updateAndroidUtsModules / buildIOSUtsYml 单独集成，不复制进 www
+    fsExtra.copySync(compiledDir, embedWwwDir, {
+      filter: source => !isNativePluginPath(path.relative(compiledDir, source))
+    })
+    removeEmptyModuleDirectories(path.join(embedWwwDir, 'uni_modules'))
     console.log(chalk.green('APP打包所需资源已更新'))
   }
 
@@ -2908,6 +2929,7 @@ function zipDirectory(sourceDir, outPath) {
       for (const file of files) {
         const fullPath = path.join(dir, file)
         const relativePath = path.relative(base, fullPath)
+        if (isNativePluginPath(relativePath)) continue
         const stat = fs.statSync(fullPath)
 
         if (stat.isDirectory()) {
