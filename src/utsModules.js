@@ -3,10 +3,12 @@
 // 触发条件: webapp 的 uni_modules/ 与 unpackage/resources/uni_modules/ 同时存在时,
 // 按 unpackage/resources/uni_modules/<id>/utssdk/<platform>/ 下的编译产物集成:
 // - android: 生成 uniplugin_<id> library 模块, 接线 settings.gradle / build.gradle
+//            模块内写入同步账本 .uapp-uts.json, 之后按账本增量刷新; 用户手改过的模块保持不动
 // - ios:     扫 utsplugins/<id>/ 下编译好的 framework, 写入 config/custom.yml
 //
 // 只处理「源码里还在」的插件: 导出目录有、uni_modules 源码没有的残留只警告不集成。
 
+import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
 
@@ -145,11 +147,6 @@ function mapSourceFile(rel, content, id) {
   return path.join('src/main/java', 'uts', 'sdk', 'modules', camel, path.basename(rel))
 }
 
-function copyTree(from, to) {
-  fs.mkdirSync(path.dirname(to), { recursive: true })
-  fs.cpSync(from, to, { recursive: true })
-}
-
 function writeIfChanged(file, content) {
   if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== content) {
     fs.mkdirSync(path.dirname(file), { recursive: true })
@@ -200,53 +197,235 @@ ${deps.map((dep) => `    ${dep}`).join('\n')}
 `
 }
 
-// 生成 uniplugin_<id> 模块目录 (已存在则视为用户维护, 不动)
-function scaffoldUtsModule({ appDir, id, platformDir, config, compileSdk, abiFilters }) {
-  const moduleName = utsModuleName(id)
-  const moduleDir = path.join(appDir, moduleName)
-  // 只有 build.gradle 在才算用户维护的模块; 只剩 build/ 编译残留的目录不能跳过,
-  // 否则 settings.gradle 会 include 一个没有构建脚本的模块, gradle 配置阶段就报错
-  if (fs.existsSync(path.join(moduleDir, 'build.gradle'))) return { skipped: true }
-  const residual = fs.existsSync(moduleDir)
+// 模块内的同步账本: 记录每个由 uapp 生成/同步的文件及其 sha1, 用于增量刷新与手改检测。
+// 账本和模块里的 build.gradle 一样属于工程状态, 不写进 .gitignore, 随工程一起入库,
+// 否则新 clone 的机器上模块有 build.gradle 却没有账本, 会被当成手工模块永久跳过刷新。
+const UTS_LEDGER = '.uapp-uts.json'
+// 生成物但用户通常会自己追加内容的文件: 手改后保留用户版本, 不因此冻结整个模块
+const UTS_SHARED_FILES = new Set(['.gitignore', 'proguard-rules.pro', 'consumer-rules.pro'])
 
-  const configDeps = androidConfigDeps(config)
+function sha1Of(content) {
+  return crypto.createHash('sha1').update(content).digest('hex')
+}
+
+// 递归列出一级目录下所有文件 (相对路径)
+function listFiles(root) {
+  const files = []
+  const walk = (rel) => {
+    const from = path.join(root, rel)
+    if (fs.statSync(from).isDirectory()) {
+      for (const name of fs.readdirSync(from)) walk(path.join(rel, name))
+      return
+    }
+    files.push(rel)
+  }
+  if (fs.existsSync(root)) for (const name of fs.readdirSync(root)) walk(name)
+  return files
+}
+
+function emptyPluginManifest() {
+  return '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android" />\n'
+}
+
+// 插件自带的 AndroidManifest.xml: 保留权限与组件声明。
+// AGP 8 起 manifest 不再允许 package 属性 (namespace 在 build.gradle 里声明), 相对类名
+// (android:name=".Foo") 因此失去解析依据, 必须先用 package 展开成全限定名, 再删掉 package 属性。
+function pluginManifest({ id, platformDir }) {
+  const warnings = []
+  const file = path.join(platformDir, 'AndroidManifest.xml')
+  if (!fs.existsSync(file)) return { content: emptyPluginManifest(), warnings }
+  let xml = fs.readFileSync(file, 'utf8')
+  const pkgMatch = /\s+package\s*=\s*("[^"]*"|'[^']*')/.exec(xml)
+  const packageName = pkgMatch ? pkgMatch[1].slice(1, -1) : ''
+  let unresolved = false
+  xml = xml.replace(/android:(?:name|targetActivity|parentActivityName)\s*=\s*("[^"]*"|'[^']*')/g, (all, quoted) => {
+    const quote = quoted[0]
+    const value = quoted.slice(1, -1)
+    if (!value.startsWith('.')) return all
+    if (!packageName) {
+      unresolved = true
+      return all
+    }
+    return all.replace(quoted, `${quote}${packageName}${value}${quote}`)
+  })
+  // tools: 属性必须自己声明命名空间, 否则合并时报错; 这种 manifest 回退成空 manifest 更安全
+  if (/\stools:[\w-]+\s*=/.test(xml) && !/xmlns:tools\s*=/.test(xml)) {
+    warnings.push(`UTS插件 ${id}: 导出产物里的 AndroidManifest.xml 使用了未声明 xmlns:tools 的 tools: 属性, 已跳过该 manifest`)
+    return { content: emptyPluginManifest(), warnings }
+  }
+  if (unresolved) {
+    warnings.push(`UTS插件 ${id}: 导出产物里的 AndroidManifest.xml 有相对类名但缺少 package 属性, 无法展开, 已跳过该 manifest`)
+    return { content: emptyPluginManifest(), warnings }
+  }
+  xml = xml.replace(/\s+package\s*=\s*("[^"]*"|'[^']*')/, '')
+  if (/\s+package\s*=/.test(xml)) {
+    warnings.push(`UTS插件 ${id}: 导出产物里的 AndroidManifest.xml 的 package 属性未能移除, 已跳过该 manifest`)
+    return { content: emptyPluginManifest(), warnings }
+  }
+  return { content: xml, warnings }
+}
+
+// 模块内要生成/同步的文件: content 为生成内容, copyFrom 为导出产物里的源文件
+function planUtsModule({ id, platformDir, config, compileSdk, abiFilters, moduleName }) {
+  const files = []
+  const warnings = []
+  const addContent = (rel, content) => files.push({ rel, content: Buffer.from(content) })
+  const addCopy = (rel, from) => files.push({ rel, copyFrom: from })
+
   const hasLibs = fs.existsSync(path.join(platformDir, 'libs')) && fs.readdirSync(path.join(platformDir, 'libs')).length > 0
-
-  writeIfChanged(path.join(moduleDir, '.gitignore'), '/build\n')
-  writeIfChanged(path.join(moduleDir, 'build.gradle'), moduleBuildGradle({
+  addContent('.gitignore', '/build\n')
+  addContent('build.gradle', moduleBuildGradle({
     moduleName,
     compileSdk,
     minSdk: config.minSdkVersion || 21,
     abiFilters: (config.abis && config.abis.length) ? config.abis.map((abi) => `"${abi}"`).join(', ') : abiFilters,
-    extraDeps: configDeps.map((dep) => dep.replace(/^implementation\b/, 'compileOnly')),
+    extraDeps: androidConfigDeps(config).map((dep) => dep.replace(/^implementation\b/, 'compileOnly')),
     hasLibs
   }))
-  writeIfChanged(path.join(moduleDir, 'proguard-rules.pro'), '')
-  writeIfChanged(path.join(moduleDir, 'consumer-rules.pro'), '')
-  writeIfChanged(path.join(moduleDir, 'src/main/AndroidManifest.xml'), '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android" />\n')
+  addContent('proguard-rules.pro', '')
+  addContent('consumer-rules.pro', '')
+  const manifest = pluginManifest({ id, platformDir })
+  warnings.push(...manifest.warnings)
+  addContent('src/main/AndroidManifest.xml', manifest.content)
 
   // 源码: src/ 下的文件按映射规则逐个落位
   const srcDir = path.join(platformDir, 'src')
-  if (fs.existsSync(srcDir)) {
-    const walk = (rel) => {
-      const from = path.join(srcDir, rel)
-      if (fs.statSync(from).isDirectory()) {
-        for (const name of fs.readdirSync(from)) walk(path.join(rel, name))
-        return
-      }
-      const relPath = mapSourceFile(rel, fs.readFileSync(from, 'utf8'), id)
-      const to = path.join(moduleDir, relPath)
-      fs.mkdirSync(path.dirname(to), { recursive: true })
-      fs.copyFileSync(from, to)
-    }
-    for (const name of fs.readdirSync(srcDir)) walk(name)
+  for (const rel of listFiles(srcDir)) {
+    addCopy(mapSourceFile(rel, fs.readFileSync(path.join(srcDir, rel), 'utf8'), id), path.join(srcDir, rel))
   }
   for (const dir of ['assets', 'res']) {
     const from = path.join(platformDir, dir)
-    if (fs.existsSync(from)) copyTree(from, path.join(moduleDir, 'src/main', dir))
+    for (const rel of listFiles(from)) addCopy(path.join('src/main', dir, rel), path.join(from, rel))
   }
-  if (hasLibs) copyTree(path.join(platformDir, 'libs'), path.join(moduleDir, 'libs'))
-  return { skipped: false, residual }
+  const libsDir = path.join(platformDir, 'libs')
+  for (const rel of listFiles(libsDir)) addCopy(path.join('libs', rel), path.join(libsDir, rel))
+  if (listFiles(libsDir).some((rel) => rel.toLowerCase().endsWith('.jar'))) {
+    warnings.push(`UTS插件 ${id}: libs 里有 jar, 会被打进 apk, 若与宿主已有依赖同名会在打包时报重复类`)
+  }
+  return { files, warnings }
+}
+
+// 账本三态: missing(没有) / invalid(损坏) / ok
+function readLedger(moduleDir) {
+  const file = path.join(moduleDir, UTS_LEDGER)
+  if (!fs.existsSync(file)) return { state: 'missing' }
+  let ledger
+  try {
+    ledger = JSON.parse(fs.readFileSync(file, 'utf8'))
+  } catch (e) {
+    return { state: 'invalid', reason: 'JSON 解析失败' }
+  }
+  if (!ledger || typeof ledger.id !== 'string' || !ledger.id || !ledger.files || typeof ledger.files !== 'object') {
+    return { state: 'invalid', reason: '缺少 id 或 files' }
+  }
+  for (const rel of Object.keys(ledger.files)) {
+    // 账本可手改, 非法路径 (绝对路径/..) 一律视为损坏, 避免误删模块外的文件
+    if (path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) {
+      return { state: 'invalid', reason: `路径越界: ${rel}` }
+    }
+  }
+  return { state: 'ok', ledger }
+}
+
+// 旧模块 (有 build.gradle 无账本) 的收编: 计划里的文件全部与磁盘一致 (或尚未生成) 才认领,
+// 认领后就能正常增量刷新; 有任何不一致仍按手工模块跳过。
+// .gitignore / *.pro 属于共享文件, 用户改过不算不一致, 收编时记入 retained 继续保留
+function adoptUtsModuleDir({ moduleDir, files }) {
+  const retained = []
+  for (const file of files) {
+    const target = path.join(moduleDir, file.rel)
+    if (!fs.existsSync(target)) continue
+    const content = file.copyFrom ? fs.readFileSync(file.copyFrom) : file.content
+    if (fs.readFileSync(target).equals(content)) continue
+    if (UTS_SHARED_FILES.has(file.rel)) {
+      retained.push(file.rel)
+      continue
+    }
+    return null
+  }
+  return { retained }
+}
+
+// 按计划同步模块目录: 只覆盖「账本记录且内容未被手改」的文件, 手改过就整块跳过。
+// .gitignore / *.pro 是用户会自己追加内容的共享文件: 手改后保留用户版本, 不冻结整个模块
+function syncUtsModuleDir({ id, moduleDir, files, ledger }) {
+  const known = ledger ? ledger.files : {}
+  // 被用户改过并保留的共享文件 (.gitignore / *.pro): 之后每轮都不再覆盖
+  const retained = new Set((ledger && ledger.retained) || [])
+  const planned = new Set(files.map((file) => file.rel))
+  const warnings = []
+  const conflicts = []
+  for (const rel of Object.keys(known)) {
+    if (UTS_SHARED_FILES.has(rel)) continue
+    const target = path.join(moduleDir, rel)
+    if (fs.existsSync(target) && sha1Of(fs.readFileSync(target)) !== known[rel]) conflicts.push(rel)
+  }
+  if (conflicts.length) return { conflicts, warnings }
+
+  const changed = []
+  const next = {}
+  for (const file of files) {
+    const target = path.join(moduleDir, file.rel)
+    const content = file.copyFrom ? fs.readFileSync(file.copyFrom) : file.content
+    const exists = fs.existsSync(target)
+    const current = exists ? fs.readFileSync(target) : null
+    const same = Boolean(current) && current.equals(content)
+    const shared = UTS_SHARED_FILES.has(file.rel)
+    const touched = exists && !same && Boolean(known[file.rel]) && sha1Of(current) !== known[file.rel]
+    if (shared && exists && !same && (touched || retained.has(file.rel))) {
+      retained.add(file.rel)
+      next[file.rel] = sha1Of(current)
+      warnings.push(`已保留模块内自定义的 ${file.rel}`)
+      continue
+    }
+    if (!same) {
+      if (exists && !known[file.rel]) warnings.push(`已覆盖模块内同名文件 ${file.rel}`)
+      fs.mkdirSync(path.dirname(target), { recursive: true })
+      fs.writeFileSync(target, content)
+      changed.push(file.rel)
+    }
+    if (same && retained.has(file.rel)) retained.delete(file.rel)
+    next[file.rel] = sha1Of(content)
+  }
+  // 账本里有、这次不再产出的文件: 只有内容未被手改时才删
+  for (const rel of Object.keys(known)) {
+    if (planned.has(rel)) continue
+    fs.rmSync(path.join(moduleDir, rel), { force: true })
+    changed.push(rel)
+  }
+  const payload = { id, files: next }
+  if (retained.size) payload.retained = [...retained].sort()
+  writeIfChanged(path.join(moduleDir, UTS_LEDGER), JSON.stringify(payload, null, 2) + '\n')
+  return { changed, warnings }
+}
+
+// 生成或刷新 uniplugin_<id> 模块目录
+function scaffoldUtsModule({ appDir, id, platformDir, config, compileSdk, abiFilters }) {
+  const moduleName = utsModuleName(id)
+  const moduleDir = path.join(appDir, moduleName)
+  const hasGradle = fs.existsSync(path.join(moduleDir, 'build.gradle'))
+  // 只剩 build/ 编译残留的目录不能跳过, 否则 settings.gradle 会 include 一个没有构建脚本的模块,
+  // gradle 配置阶段就报错
+  const residual = !hasGradle && fs.existsSync(moduleDir)
+  const { state, ledger, reason } = readLedger(moduleDir)
+  if (state === 'invalid') return { status: 'legacy', reason, residual }
+  // 模块名是插件 id 去掉横线, 不同 id 可能撞名; 不覆盖别的插件生成的模块
+  if (state === 'ok' && ledger.id !== id) return { status: 'owner', owner: ledger.id, residual }
+
+  const plan = planUtsModule({ id, platformDir, config, compileSdk, abiFilters, moduleName })
+  const warnings = [...plan.warnings]
+  // 有构建脚本但没有账本: 内容一致就收编, 对不上就按旧版本/手工模块保持原样
+  let adopted = null
+  if (state === 'missing' && hasGradle) {
+    adopted = adoptUtsModuleDir({ moduleDir, files: plan.files })
+    if (!adopted) return { status: 'legacy', residual, warnings }
+  }
+  const base = state === 'ok' ? ledger : (adopted ? { id, files: {}, retained: adopted.retained } : null)
+  const sync = syncUtsModuleDir({ id, moduleDir, files: plan.files, ledger: base })
+  warnings.push(...sync.warnings)
+  if (sync.conflicts) return { status: 'conflict', conflicts: sync.conflicts, residual, warnings }
+  if (!hasGradle) return { status: 'created', residual, warnings }
+  return { status: sync.changed.length ? 'updated' : 'unchanged', residual, warnings }
 }
 
 // settings.gradle: include 行放进自己的标记块, 对 plain 已有的 include 去重
@@ -404,6 +583,7 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
   const result = {
     warnings: [],
     created: [],
+    updated: [],
     skipped: [],
     gradleAdded: [],
     gradleRemoved: [],
@@ -420,14 +600,15 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
 
   // 主工程参数, 模块模板对齐用
   const compileSdk = Number(/compileSdk\s+(\d+)/.exec(raw)?.[1]) || 35
-  const abiFilters = /abiFilters\s+(.+)/.exec(raw)?.[1]?.trim() || '"arm64-v8a"'
+  // 只取 abiFilters 同一行的值: 单行写法 ndk { abiFilters "x" } 不能把行尾的 } 一起吞进来
+  const abiFilters = /abiFilters\s+([^}\n]+)/.exec(raw)?.[1]?.trim() || '"arm64-v8a"'
 
   const moduleNames = []
   const blocks = []
   const baseLines = []
   for (const plugin of plugins) {
     const moduleName = utsModuleName(plugin.id)
-    moduleNames.push(moduleName)
+    if (!moduleNames.includes(moduleName)) moduleNames.push(moduleName)
 
     const scaffold = scaffoldUtsModule({
       appDir,
@@ -437,16 +618,35 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
       compileSdk,
       abiFilters
     })
-    if (scaffold.skipped) result.skipped.push(plugin.id)
-    else {
+    result.warnings.push(...(scaffold.warnings || []))
+    const moduleDir = path.join(appDir, moduleName)
+    if (scaffold.status === 'legacy') {
+      result.skipped.push(plugin.id)
+      if (scaffold.reason) {
+        result.warnings.push(`UTS插件 ${plugin.id}: 同步账本 ${UTS_LEDGER} 已损坏 (${scaffold.reason}), 跳过更新 (请删除 ${moduleDir} 后重新 prepare)`)
+      } else {
+        result.warnings.push(`UTS插件 ${plugin.id}: 同步账本缺失且内容与生成结果不一致, 视为手工维护, 跳过更新 (如需自动同步请删除 ${moduleDir} 后重新 prepare)`)
+      }
+    } else if (scaffold.status === 'owner') {
+      result.skipped.push(plugin.id)
+      result.warnings.push(`UTS插件 ${plugin.id}: ${moduleName} 已由插件 ${scaffold.owner} 生成 (模块名重名), 跳过更新, 请给其中一个插件改名`)
+    } else if (scaffold.status === 'conflict') {
+      result.skipped.push(plugin.id)
+      result.warnings.push(`UTS插件 ${plugin.id}: ${moduleName} 已手工修改 (${scaffold.conflicts.join(', ')}), 跳过更新 (如需重新生成请删除 ${moduleDir} 后重新 prepare)`)
+    } else if (scaffold.status === 'created') {
       result.created.push(plugin.id)
       if (scaffold.residual) {
         result.warnings.push(`UTS插件 ${plugin.id}: ${moduleName} 目录缺少 build.gradle (只剩编译残留), 已按导出产物重新生成模块`)
       }
+    } else if (scaffold.status === 'updated') {
+      result.updated.push(plugin.id)
     }
 
     const lines = androidConfigDeps(plugin.config)
     lines.push(`implementation project(':${moduleName}')`)
+    // 模块内 libs 只对模块自身编译可见 (aar 用 compileOnly, jar 不参与编译),
+    // 要打进 apk 必须在 app 侧再引用一次; 多个插件共用同一 fileTree 时 Gradle 会自动去重
+    lines.push(`implementation fileTree(dir: rootProject.file('${moduleName}/libs'), include: ['*.aar', '*.jar'])`)
     blocks.push({ id: plugin.id, lines })
   }
 

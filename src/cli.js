@@ -1042,6 +1042,7 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
     gradleAdded: pluginGradle.added,
     gradleRemoved: pluginGradle.removed,
     utsCreated: utsModules.created,
+    utsUpdated: utsModules.updated,
     utsSkipped: utsModules.skipped,
     utsGradleAdded: utsModules.gradleAdded,
     utsGradleRemoved: utsModules.gradleRemoved,
@@ -2528,7 +2529,8 @@ function printModuleNotice() {
       console.log(`✅ Android 插件依赖/参数已写入 app/build.gradle：${parts.join('；')}`)
     }
     if (android.utsCreated?.length) console.log(`✅ UTS插件模块已生成：${android.utsCreated.join(', ')}`)
-    if (android.utsSkipped?.length) console.log(`ℹ️ UTS插件模块已存在，未重新生成：${android.utsSkipped.join(', ')}`)
+    if (android.utsUpdated?.length) console.log(`✅ UTS插件模块已更新：${android.utsUpdated.join(', ')}`)
+    if (android.utsSkipped?.length) console.log(`ℹ️ UTS插件模块未自动更新：${android.utsSkipped.join(', ')}`)
     if (android.utsGradleAdded?.length || android.utsGradleRemoved?.length) {
       const parts = []
       if (android.utsGradleAdded.length) parts.push(`新增 ${android.utsGradleAdded.join(', ')}`)
@@ -2547,7 +2549,7 @@ function printModuleNotice() {
       if (android.added.length) parts.push(`新增 ${android.added.join(', ')}`)
       if (android.removed.length) parts.push(`移除 ${android.removed.join(', ')}（模块已取消勾选）`)
       console.log(`✅ Android 模块依赖已更新 sdk.libs：${parts.join('；')}`)
-    } else if (!android.featureAdded?.length && !android.pluginAdded?.length && !android.registryAdded?.length && !android.gradleAdded?.length && !android.gradleRemoved?.length && !android.utsCreated?.length && !android.utsGradleAdded?.length && !android.utsGradleRemoved?.length && !android.utsSettingsChanged && !android.utsClasspathAdded && !android.utsJitpackAdded) {
+    } else if (!android.featureAdded?.length && !android.pluginAdded?.length && !android.registryAdded?.length && !android.gradleAdded?.length && !android.gradleRemoved?.length && !android.utsCreated?.length && !android.utsUpdated?.length && !android.utsSkipped?.length && !android.utsGradleAdded?.length && !android.utsGradleRemoved?.length && !android.utsSettingsChanged && !android.utsClasspathAdded && !android.utsJitpackAdded) {
       console.log('✅ Android 模块依赖已是最新')
     }
   }
