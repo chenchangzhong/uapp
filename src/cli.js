@@ -2062,6 +2062,16 @@ const PLUGIN_MARK_END = /^#\s*(.+?)原生插件-end\s*$/
 function mergeIntoUAppBase(content, groups) {
   let text = content
   let added = 0
+  // 插件手写块里的库如果已经不在磁盘上（插件换版本/拆包后旧库被删），必须清掉：
+  // xcodegen 仍会把它写进 target 的 Frameworks 阶段，链接时报 framework 'X' not found
+  const pruned = new Set()
+  const staleHandFramework = (item) => {
+    const match = /^\s*- framework:\s*(\S+)\s*$/.exec(item.lines[0])
+    if (!match) return null
+    const target = match[1]
+    if (path.isAbsolute(target) || target.includes('$(')) return null
+    return fs.existsSync(path.resolve($G.appDir, target)) ? null : target
+  }
 
   const keyOf = (line) => {
     const match = /^\s*- (?:sdk|framework|path): (.+?)\s*$/.exec(line)
@@ -2164,10 +2174,24 @@ function mergeIntoUAppBase(content, groups) {
       }
     }
 
+    // 块外条目与用户手写注释一律保留；旧 uapp 标记块里的条目丢弃后重写；
+    // 手写插件块里磁盘上已不存在的库清掉（插件不再使用的库不该继续留在配置里）
+    const kept = items.filter((item) => {
+      if (item.kind === 'mark' || item.inMark) return false
+      if (item.kind === 'entry' && item.inHand) {
+        const stale = staleHandFramework(item)
+        if (stale) {
+          pruned.add(stale)
+          return false
+        }
+      }
+      return true
+    })
+
     // 块外已有的依赖（用户手写或别的工具生成）优先保留，uapp 不再重复写入
     const outsideKeys = new Set(
-      items
-        .filter((item) => item.kind === 'entry' && !item.inMark)
+      kept
+        .filter((item) => item.kind === 'entry')
         .map((item) => keyOf(item.lines[0]))
         .filter(Boolean)
     )
@@ -2178,7 +2202,7 @@ function mergeIntoUAppBase(content, groups) {
     groups.forEach(({ name, dependencies = [], sources = [] }) => {
       const list = pick({ dependencies, sources })
       if (!list || !list.length) return
-      const kept = []
+      const keptItems = []
       groupLines(list).forEach((item) => {
         const key = keyOf(item[0])
         if (key) {
@@ -2186,13 +2210,10 @@ function mergeIntoUAppBase(content, groups) {
           if (seenFresh.has(key)) return
           seenFresh.add(key)
         }
-        kept.push(item)
+        keptItems.push(item)
       })
-      if (kept.length) freshGroups.push({ name, items: kept })
+      if (keptItems.length) freshGroups.push({ name, items: keptItems })
     })
-
-    // 块外条目与用户手写注释一律保留；旧 uapp 标记块里的条目丢弃后重写
-    const kept = items.filter((item) => item.kind !== 'mark' && !item.inMark)
 
     const oldMarkedKeys = new Set(
       items.filter((item) => item.kind === 'entry' && item.inMark).map((item) => keyOf(item.lines[0])).filter(Boolean)
@@ -2258,7 +2279,7 @@ function mergeIntoUAppBase(content, groups) {
 
   apply('dependencies', ({ dependencies }) => dependencies)
   apply('sources', ({ sources }) => sources)
-  return text === null ? null : { content: text, added }
+  return text === null ? null : { content: text, added, pruned: [...pruned] }
 }
 
 // 模块/插件全部关掉后 uAppBase 会剩一个空 map 头，还原成 uAppBase: {}（xcodegen 不接受 null）
@@ -2319,6 +2340,11 @@ function updateIOSCustomYml({ groups }) {
     if (merged === null) {
       console.log(chalk.yellow('config/custom.yml 的 targetTemplates.uAppBase 已被自定义，未写入模块/原生插件依赖'))
       return
+    }
+    if (merged.pruned.length) {
+      console.log(
+        chalk.yellow(`已移除插件里已不存在的库（留着会链接失败 framework not found）: ${merged.pruned.join(', ')}`)
+      )
     }
     if (merged.added) console.log(`✅ 已合并 ${merged.added} 条模块/原生插件依赖到 config/custom.yml`)
     content = collapseEmptyUAppBase(merged.content)
