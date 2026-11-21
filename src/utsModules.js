@@ -148,15 +148,19 @@ function mapSourceFile(rel, content, id) {
 }
 
 function writeIfChanged(file, content) {
-  if (!fs.existsSync(file) || fs.readFileSync(file, 'utf8') !== content) {
-    fs.mkdirSync(path.dirname(file), { recursive: true })
-    fs.writeFileSync(file, content)
-  }
+  if (fs.existsSync(file) && fs.readFileSync(file).equals(Buffer.from(content))) return false
+  const tmp = `${file}.uapp-tmp`
+  fs.mkdirSync(path.dirname(file), { recursive: true })
+  // 先写临时文件再 rename: prepare 被中断时不会留下半截文件
+  fs.writeFileSync(tmp, content)
+  fs.renameSync(tmp, file)
+  return true
 }
 
 function moduleBuildGradle({ moduleName, compileSdk, minSdk, abiFilters, extraDeps, hasLibs }) {
   const deps = [...UTS_MODULE_DEPS]
-  if (hasLibs) deps.push(`compileOnly fileTree(include: ['*.aar'], dir: 'libs')`)
+  // 模块内 aar/jar 只供编译: 有 jar 时也要放进 include, 否则插件源码 import jar 里的类会编译失败
+  if (hasLibs) deps.push(`compileOnly fileTree(include: ['*.aar', '*.jar'], dir: 'libs')`)
   deps.push(...extraDeps)
   return `apply plugin: 'com.android.library'
 apply plugin: 'org.jetbrains.kotlin.android'
@@ -227,6 +231,18 @@ function emptyPluginManifest() {
   return '<?xml version="1.0" encoding="utf-8"?>\n<manifest xmlns:android="http://schemas.android.com/apk/res/android" />\n'
 }
 
+// 只有这些元素上的 name / targetActivity 等属性是类名, uses-permission 的 name 是权限名、
+// meta-data 的 name 是 key, 都不能按类名展开
+const MANIFEST_CLASS_TAGS = new Set(['application', 'activity', 'activity-alias', 'service', 'receiver', 'provider', 'instrumentation'])
+const MANIFEST_CLASS_ATTRS = ['android:name', 'android:targetActivity', 'android:parentActivityName', 'android:backupAgent', 'android:manageSpaceActivity', 'android:appComponentFactory']
+
+function expandManifestClass(packageName, value) {
+  // android 语义: 以 . 开头或不含 . 的值相对 package, 其余是完整类名
+  if (value.startsWith('.')) return packageName + value
+  if (!value.includes('.')) return `${packageName}.${value}`
+  return value
+}
+
 // 插件自带的 AndroidManifest.xml: 保留权限与组件声明。
 // AGP 8 起 manifest 不再允许 package 属性 (namespace 在 build.gradle 里声明), 相对类名
 // (android:name=".Foo") 因此失去解析依据, 必须先用 package 展开成全限定名, 再删掉 package 属性。
@@ -238,15 +254,26 @@ function pluginManifest({ id, platformDir }) {
   const pkgMatch = /\s+package\s*=\s*("[^"]*"|'[^']*')/.exec(xml)
   const packageName = pkgMatch ? pkgMatch[1].slice(1, -1) : ''
   let unresolved = false
-  xml = xml.replace(/android:(?:name|targetActivity|parentActivityName)\s*=\s*("[^"]*"|'[^']*')/g, (all, quoted) => {
-    const quote = quoted[0]
-    const value = quoted.slice(1, -1)
-    if (!value.startsWith('.')) return all
-    if (!packageName) {
-      unresolved = true
-      return all
+  xml = xml.replace(/<([a-zA-Z][\w.-]*)((?:\s[^<>]*?)?)(\s*\/?>)/g, (tag, name, attrs, close) => {
+    if (!MANIFEST_CLASS_TAGS.has(name)) return tag
+    let out = attrs
+    for (const attr of MANIFEST_CLASS_ATTRS) {
+      const re = new RegExp(`(${attr}\\s*=\\s*)("[^"]*"|'[^']*')`, 'g')
+      out = out.replace(re, (all, prefix, quoted) => {
+        const quote = quoted[0]
+        const value = quoted.slice(1, -1)
+        // @string/@null 等资源引用、${applicationId} 模板、以及本身就是完整类名的值都不动
+        if (!value || value.startsWith('@') || value.includes('${')) return all
+        // 相对类名: 以 . 开头, 或完全不带点 (Android 同样按 package 解析)
+        if (!value.startsWith('.') && value.includes('.')) return all
+        if (!packageName) {
+          unresolved = true
+          return all
+        }
+        return `${prefix}${quote}${expandManifestClass(packageName, value)}${quote}`
+      })
     }
-    return all.replace(quoted, `${quote}${packageName}${value}${quote}`)
+    return `<${name}${out}${close}`
   })
   // tools: 属性必须自己声明命名空间, 否则合并时报错; 这种 manifest 回退成空 manifest 更安全
   if (/\stools:[\w-]+\s*=/.test(xml) && !/xmlns:tools\s*=/.test(xml)) {
@@ -305,7 +332,17 @@ function planUtsModule({ id, platformDir, config, compileSdk, abiFilters, module
   return { files, warnings }
 }
 
+// 账本里的相对路径必须是模块内的普通文件路径
+function isSafeRelPath(rel) {
+  if (typeof rel !== 'string' || !rel) return false
+  if (rel === '.' || /[\\/]$/.test(rel)) return false
+  if (path.isAbsolute(rel)) return false
+  return !rel.split(/[\\/]/).includes('..')
+}
+
 // 账本三态: missing(没有) / invalid(损坏) / ok
+// 账本是随工程入库、可手改、会在合并时冲突的 JSON: 形状不对一律按 invalid 处理,
+// 不能抛异常把整个 prepare 打挂
 function readLedger(moduleDir) {
   const file = path.join(moduleDir, UTS_LEDGER)
   if (!fs.existsSync(file)) return { state: 'missing' }
@@ -315,14 +352,16 @@ function readLedger(moduleDir) {
   } catch (e) {
     return { state: 'invalid', reason: 'JSON 解析失败' }
   }
-  if (!ledger || typeof ledger.id !== 'string' || !ledger.id || !ledger.files || typeof ledger.files !== 'object') {
-    return { state: 'invalid', reason: '缺少 id 或 files' }
+  const fail = (reason) => ({ state: 'invalid', reason })
+  if (!ledger || typeof ledger !== 'object' || Array.isArray(ledger)) return fail('不是对象')
+  if (typeof ledger.id !== 'string' || !ledger.id) return fail('缺少 id')
+  if (!ledger.files || typeof ledger.files !== 'object' || Array.isArray(ledger.files)) return fail('files 不是对象')
+  for (const [rel, hash] of Object.entries(ledger.files)) {
+    if (!isSafeRelPath(rel)) return fail(`路径越界: ${rel}`)
+    if (typeof hash !== 'string' || !hash) return fail(`校验值非法: ${rel}`)
   }
-  for (const rel of Object.keys(ledger.files)) {
-    // 账本可手改, 非法路径 (绝对路径/..) 一律视为损坏, 避免误删模块外的文件
-    if (path.isAbsolute(rel) || rel.split(/[\\/]/).includes('..')) {
-      return { state: 'invalid', reason: `路径越界: ${rel}` }
-    }
+  if (ledger.retained !== undefined) {
+    if (!Array.isArray(ledger.retained) || ledger.retained.some((rel) => !isSafeRelPath(rel))) return fail('retained 不是合法的路径数组')
   }
   return { state: 'ok', ledger }
 }
@@ -336,14 +375,18 @@ function adoptUtsModuleDir({ moduleDir, files }) {
     const target = path.join(moduleDir, file.rel)
     if (!fs.existsSync(target)) continue
     const content = file.copyFrom ? fs.readFileSync(file.copyFrom) : file.content
-    if (fs.readFileSync(target).equals(content)) continue
+    // 账本里可能出现目录条目, 只比较普通文件
+    if (!fs.statSync(target).isFile() || fs.readFileSync(target).equals(content)) continue
     if (UTS_SHARED_FILES.has(file.rel)) {
       retained.push(file.rel)
       continue
     }
     return null
   }
-  return { retained }
+  // 模块里计划之外的文件 (用户自己的源码/资源) 永远不动, 只提示一下
+  const planned = new Set(files.map((file) => file.rel))
+  const unmanaged = listFiles(moduleDir).filter((rel) => !planned.has(rel) && rel !== UTS_LEDGER)
+  return { retained, unmanaged }
 }
 
 // 按计划同步模块目录: 只覆盖「账本记录且内容未被手改」的文件, 手改过就整块跳过。
@@ -355,10 +398,18 @@ function syncUtsModuleDir({ id, moduleDir, files, ledger }) {
   const planned = new Set(files.map((file) => file.rel))
   const warnings = []
   const conflicts = []
+  // 本次计划里每个文件的 sha1, 用来区分「用户手改」与「上次写入被打断」:
+  // 磁盘内容等于计划内容说明上一轮已经写成功、只是账本没落盘, 继续写即可
+  const plannedHash = new Map()
+  for (const file of files) {
+    plannedHash.set(file.rel, sha1Of(file.copyFrom ? fs.readFileSync(file.copyFrom) : file.content))
+  }
   for (const rel of Object.keys(known)) {
     if (UTS_SHARED_FILES.has(rel)) continue
     const target = path.join(moduleDir, rel)
-    if (fs.existsSync(target) && sha1Of(fs.readFileSync(target)) !== known[rel]) conflicts.push(rel)
+    if (!fs.existsSync(target) || !fs.statSync(target).isFile()) continue
+    const hash = sha1Of(fs.readFileSync(target))
+    if (hash !== known[rel] && hash !== plannedHash.get(rel)) conflicts.push(rel)
   }
   if (conflicts.length) return { conflicts, warnings }
 
@@ -367,7 +418,7 @@ function syncUtsModuleDir({ id, moduleDir, files, ledger }) {
   for (const file of files) {
     const target = path.join(moduleDir, file.rel)
     const content = file.copyFrom ? fs.readFileSync(file.copyFrom) : file.content
-    const exists = fs.existsSync(target)
+    const exists = fs.existsSync(target) && fs.statSync(target).isFile()
     const current = exists ? fs.readFileSync(target) : null
     const same = Boolean(current) && current.equals(content)
     const shared = UTS_SHARED_FILES.has(file.rel)
@@ -375,13 +426,12 @@ function syncUtsModuleDir({ id, moduleDir, files, ledger }) {
     if (shared && exists && !same && (touched || retained.has(file.rel))) {
       retained.add(file.rel)
       next[file.rel] = sha1Of(current)
-      warnings.push(`已保留模块内自定义的 ${file.rel}`)
+      warnings.push(`已保留模块内自定义的 ${file.rel} (删除该文件后重新 prepare 可恢复生成内容)`)
       continue
     }
     if (!same) {
-      if (exists && !known[file.rel]) warnings.push(`已覆盖模块内同名文件 ${file.rel}`)
-      fs.mkdirSync(path.dirname(target), { recursive: true })
-      fs.writeFileSync(target, content)
+      if (exists && !known[file.rel]) warnings.push(`已覆盖模块内未入账的同名文件 ${file.rel}`)
+      writeIfChanged(target, content)
       changed.push(file.rel)
     }
     if (same && retained.has(file.rel)) retained.delete(file.rel)
@@ -390,7 +440,9 @@ function syncUtsModuleDir({ id, moduleDir, files, ledger }) {
   // 账本里有、这次不再产出的文件: 只有内容未被手改时才删
   for (const rel of Object.keys(known)) {
     if (planned.has(rel)) continue
-    fs.rmSync(path.join(moduleDir, rel), { force: true })
+    const target = path.join(moduleDir, rel)
+    if (!fs.existsSync(target)) continue
+    fs.rmSync(target, { force: true })
     changed.push(rel)
   }
   const payload = { id, files: next }
@@ -407,25 +459,46 @@ function scaffoldUtsModule({ appDir, id, platformDir, config, compileSdk, abiFil
   // 只剩 build/ 编译残留的目录不能跳过, 否则 settings.gradle 会 include 一个没有构建脚本的模块,
   // gradle 配置阶段就报错
   const residual = !hasGradle && fs.existsSync(moduleDir)
-  const { state, ledger, reason } = readLedger(moduleDir)
-  if (state === 'invalid') return { status: 'legacy', reason, residual }
-  // 模块名是插件 id 去掉横线, 不同 id 可能撞名; 不覆盖别的插件生成的模块
-  if (state === 'ok' && ledger.id !== id) return { status: 'owner', owner: ledger.id, residual }
+  // 模块同步失败 (账本形状异常、文件系统竞争等) 只降级成 legacy, 不能把整个 prepare 打挂
+  try {
+    const { state, ledger, reason } = readLedger(moduleDir)
+    // 模块名是插件 id 去掉横线, 不同 id 可能撞名; 不覆盖别的插件生成的模块
+    if (state === 'ok' && ledger.id !== id) return { status: 'owner', owner: ledger.id, residual }
 
-  const plan = planUtsModule({ id, platformDir, config, compileSdk, abiFilters, moduleName })
-  const warnings = [...plan.warnings]
-  // 有构建脚本但没有账本: 内容一致就收编, 对不上就按旧版本/手工模块保持原样
-  let adopted = null
-  if (state === 'missing' && hasGradle) {
-    adopted = adoptUtsModuleDir({ moduleDir, files: plan.files })
-    if (!adopted) return { status: 'legacy', residual, warnings }
+    const module = planUtsModule({ id, platformDir, config, compileSdk, abiFilters, moduleName })
+    const warnings = [...module.warnings]
+    // 没有构建脚本 = 新建或只剩编译残留, 不需要收编
+    let base = state === 'ok' ? ledger : null
+    let adopted = false
+    if (!base && hasGradle) {
+      // 旧模块或账本损坏: 计划内文件与磁盘逐字节一致才收编 (损坏时顺带重写账本)
+      const adopt = adoptUtsModuleDir({ moduleDir, files: module.files })
+      if (!adopt) {
+        if (state !== 'invalid') return { status: 'legacy', residual, warnings }
+        return {
+          status: 'legacy',
+          residual,
+          warnings,
+          reason: `${reason}; 如果确认模块可以重新生成, 先在模块目录执行 git checkout -- ${UTS_LEDGER}, 再删除 ${moduleDir} 后重新 prepare`
+        }
+      }
+      base = { id, files: {}, retained: adopt.retained }
+      adopted = true
+      if (state === 'invalid') warnings.push(`${moduleName} 的同步账本已损坏 (${reason}), 已按模块现有内容重建`)
+      if (adopt.unmanaged.length) {
+        const shown = adopt.unmanaged.slice(0, 3).join(', ')
+        warnings.push(`${moduleName} 里未纳管的文件保持原样: ${shown}${adopt.unmanaged.length > 3 ? ' 等' : ''}`)
+      }
+    }
+    const sync = syncUtsModuleDir({ id, moduleDir, files: module.files, ledger: base })
+    warnings.push(...sync.warnings)
+    if (sync.conflicts) return { status: 'conflict', conflicts: sync.conflicts, residual, warnings }
+    if (adopted) return { status: 'adopted', residual, warnings }
+    if (!hasGradle) return { status: 'created', residual, warnings }
+    return { status: sync.changed.length ? 'updated' : 'unchanged', residual, warnings }
+  } catch (e) {
+    return { status: 'legacy', residual, reason: e.message }
   }
-  const base = state === 'ok' ? ledger : (adopted ? { id, files: {}, retained: adopted.retained } : null)
-  const sync = syncUtsModuleDir({ id, moduleDir, files: plan.files, ledger: base })
-  warnings.push(...sync.warnings)
-  if (sync.conflicts) return { status: 'conflict', conflicts: sync.conflicts, residual, warnings }
-  if (!hasGradle) return { status: 'created', residual, warnings }
-  return { status: sync.changed.length ? 'updated' : 'unchanged', residual, warnings }
 }
 
 // settings.gradle: include 行放进自己的标记块, 对 plain 已有的 include 去重
@@ -584,6 +657,7 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
     warnings: [],
     created: [],
     updated: [],
+    adopted: [],
     skipped: [],
     gradleAdded: [],
     gradleRemoved: [],
@@ -600,8 +674,8 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
 
   // 主工程参数, 模块模板对齐用
   const compileSdk = Number(/compileSdk\s+(\d+)/.exec(raw)?.[1]) || 35
-  // 只取 abiFilters 同一行的值: 单行写法 ndk { abiFilters "x" } 不能把行尾的 } 一起吞进来
-  const abiFilters = /abiFilters\s+([^}\n]+)/.exec(raw)?.[1]?.trim() || '"arm64-v8a"'
+  // 只取 abiFilters 同一行的值: 单行写法 ndk { abiFilters "x" } 不能把行尾的 } 与注释一起吞进来
+  const abiFilters = (/abiFilters\s+([^}\n]+)/.exec(raw)?.[1]?.replace(/\/\/.*$/, '').replace(/[,;\s]+$/, '').trim()) || '"arm64-v8a"'
 
   const moduleNames = []
   const blocks = []
@@ -623,7 +697,7 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
     if (scaffold.status === 'legacy') {
       result.skipped.push(plugin.id)
       if (scaffold.reason) {
-        result.warnings.push(`UTS插件 ${plugin.id}: 同步账本 ${UTS_LEDGER} 已损坏 (${scaffold.reason}), 跳过更新 (请删除 ${moduleDir} 后重新 prepare)`)
+        result.warnings.push(`UTS插件 ${plugin.id}: 同步账本 ${UTS_LEDGER} 已损坏 (${scaffold.reason}), 跳过更新`)
       } else {
         result.warnings.push(`UTS插件 ${plugin.id}: 同步账本缺失且内容与生成结果不一致, 视为手工维护, 跳过更新 (如需自动同步请删除 ${moduleDir} 后重新 prepare)`)
       }
@@ -638,9 +712,14 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
       if (scaffold.residual) {
         result.warnings.push(`UTS插件 ${plugin.id}: ${moduleName} 目录缺少 build.gradle (只剩编译残留), 已按导出产物重新生成模块`)
       }
+    } else if (scaffold.status === 'adopted') {
+      result.adopted.push(plugin.id)
     } else if (scaffold.status === 'updated') {
       result.updated.push(plugin.id)
     }
+    // 撞名时模块属于另一个插件, 不能再给 App 加一份重复依赖;
+    // 手工维护/冲突的模块仍然要被 App 依赖, 依赖块照常写
+    if (scaffold.status === 'owner') continue
 
     const lines = androidConfigDeps(plugin.config)
     lines.push(`implementation project(':${moduleName}')`)
