@@ -20,6 +20,7 @@ import sync from './sync.js'
 import { readConfig, configCommand } from './config.js'
 import { buildIOSModuleYml, patchFeaturePlist } from './iosModules.js'
 import { updateAndroidModuleLibs, updateAndroidNativePluginLibs, updateAndroidUniplugins, updateAndroidPluginGradle, patchDcloudProperties, ANDROID_MODULE_PERMISSIONS, SDK_CONFIG_PERMISSIONS, ANDROID_MODULE_USES_FEATURES, ANDROID_SDK31_PERMISSIONS, MODULE_SDK_CONFIG, resolveAndroidTargetSdk } from './androidModules.js'
+import { updateAndroidUtsModules, buildIOSUtsYml } from './utsModules.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -999,6 +1000,11 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
     webAppDir: $G.webAppDir,
     nativePlugins: $G.manifest['app-plus']?.nativePlugins,
   })
+  // UTS 插件 -> uniplugin_<id> 模块 + settings.gradle / app、根 build.gradle 接线
+  const utsModules = updateAndroidUtsModules({
+    appDir: $G.appDir,
+    webAppDir: $G.webAppDir,
+  })
   if (androidModuleNotice.errors?.length) {
     androidModuleNotice.errors.forEach((error) => console.log(chalk.red(error)))
     console.log(chalk.red('❌ Android 模块缺少权限声明，打包中止'))
@@ -1006,7 +1012,7 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
   }
   $G.androidModuleNotice = {
     ...androidModuleNotice,
-    warnings: [...androidModuleNotice.warnings, ...featurePatch.warnings, ...pluginLibs.warnings, ...pluginRegistry.warnings, ...pluginGradle.warnings],
+    warnings: [...androidModuleNotice.warnings, ...featurePatch.warnings, ...pluginLibs.warnings, ...pluginRegistry.warnings, ...pluginGradle.warnings, ...utsModules.warnings],
     featureAdded: featurePatch.added,
     pluginAdded: pluginLibs.added,
     pluginRemoved: pluginLibs.removed,
@@ -1014,6 +1020,13 @@ public class WXPayEntryActivity extends AbsWXPayCallbackActivity{
     registryRemoved: pluginRegistry.removed,
     gradleAdded: pluginGradle.added,
     gradleRemoved: pluginGradle.removed,
+    utsCreated: utsModules.created,
+    utsSkipped: utsModules.skipped,
+    utsGradleAdded: utsModules.gradleAdded,
+    utsGradleRemoved: utsModules.gradleRemoved,
+    utsSettingsChanged: utsModules.settingsChanged,
+    utsClasspathAdded: utsModules.classpathAdded,
+    utsJitpackAdded: utsModules.jitpackAdded,
   }
 
   console.log('✅ updateAndroidMetaData')
@@ -2462,6 +2475,8 @@ function printModuleNotice() {
   if (ios) {
     $G.iosModuleNotice = null
     if (ios.warnings.length) ios.warnings.forEach((warning) => console.log(chalk.yellow(warning)))
+    if (ios.utsPlugins?.length) console.log(`✅ UTS插件 framework 已写入 config/custom.yml：${ios.utsPlugins.join(', ')}`)
+    if (ios.utsSkippedPlugins?.length) console.log(`ℹ️ UTS插件 framework 已配置，未改动：${ios.utsSkippedPlugins.join(', ')}`)
     if (ios.added.length) {
       console.log(`✅ feature.plist 已注册模块：${ios.added.join(', ')}`)
     } else {
@@ -2491,12 +2506,27 @@ function printModuleNotice() {
       if (android.gradleRemoved.length) parts.push(`移除 ${android.gradleRemoved.join(', ')}`)
       console.log(`✅ Android 插件依赖/参数已写入 app/build.gradle：${parts.join('；')}`)
     }
+    if (android.utsCreated?.length) console.log(`✅ UTS插件模块已生成：${android.utsCreated.join(', ')}`)
+    if (android.utsSkipped?.length) console.log(`ℹ️ UTS插件模块已存在，未重新生成：${android.utsSkipped.join(', ')}`)
+    if (android.utsGradleAdded?.length || android.utsGradleRemoved?.length) {
+      const parts = []
+      if (android.utsGradleAdded.length) parts.push(`新增 ${android.utsGradleAdded.join(', ')}`)
+      if (android.utsGradleRemoved.length) parts.push(`移除 ${android.utsGradleRemoved.join(', ')}`)
+      console.log(`✅ UTS插件依赖已写入 app/build.gradle：${parts.join('；')}`)
+    }
+    if (android.utsSettingsChanged) console.log('✅ settings.gradle 已更新 UTS 插件模块引用')
+    if (android.utsClasspathAdded || android.utsJitpackAdded) {
+      const parts = []
+      if (android.utsClasspathAdded) parts.push('kotlin-gradle-plugin')
+      if (android.utsJitpackAdded) parts.push('jitpack 仓库')
+      console.log(`✅ 根 build.gradle 已补写：${parts.join('、')}`)
+    }
     if (android.added.length || android.removed.length) {
       const parts = []
       if (android.added.length) parts.push(`新增 ${android.added.join(', ')}`)
       if (android.removed.length) parts.push(`移除 ${android.removed.join(', ')}（模块已取消勾选）`)
       console.log(`✅ Android 模块依赖已更新 sdk.libs：${parts.join('；')}`)
-    } else if (!android.featureAdded?.length && !android.pluginAdded?.length && !android.registryAdded?.length && !android.gradleAdded?.length && !android.gradleRemoved?.length) {
+    } else if (!android.featureAdded?.length && !android.pluginAdded?.length && !android.registryAdded?.length && !android.gradleAdded?.length && !android.gradleRemoved?.length && !android.utsCreated?.length && !android.utsGradleAdded?.length && !android.utsGradleRemoved?.length && !android.utsSettingsChanged && !android.utsClasspathAdded && !android.utsJitpackAdded) {
       console.log('✅ Android 模块依赖已是最新')
     }
   }
@@ -2515,15 +2545,22 @@ function updateIOSNativePlugins(plistFile) {
     console.log(chalk.red('❌ iOS 模块缺少隐私描述，打包中止'))
     process.exit(1)
   }
-  updateIOSCustomYml(mergeIOSYml(moduleYml, buildIOSNativePluginYml(plugins)))
+  // UTS 插件 -> utsplugins/<id>/ 下的 framework -> config/custom.yml
+  const utsYml = buildIOSUtsYml({
+    appDir: $G.appDir,
+    webAppDir: $G.webAppDir,
+  })
+  updateIOSCustomYml(mergeIOSYml(moduleYml, buildIOSNativePluginYml(plugins), utsYml))
   const featurePatch = patchFeaturePlist({
     plistPath: path.join($G.appDir, 'SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist'),
     modules: $G.manifest['app-plus']?.modules,
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
   })
   $G.iosModuleNotice = {
-    warnings: [...moduleYml.warnings, ...featurePatch.warnings],
+    warnings: [...moduleYml.warnings, ...featurePatch.warnings, ...utsYml.warnings],
     added: featurePatch.added,
+    utsPlugins: utsYml.groups.filter((group) => !group.skipped).map((group) => group.name),
+    utsSkippedPlugins: utsYml.groups.filter((group) => group.skipped).map((group) => group.name),
   }
   updateIOSUniplugins(plistFile, plugins)
   if (!plugins.length) return
