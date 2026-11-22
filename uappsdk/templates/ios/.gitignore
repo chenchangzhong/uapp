@@ -1,5 +1,9 @@
 # 构建产物
 out/
+# CocoaPods 依赖目录 (pod install 生成, Podfile.lock 可完整复现, uapp 构建时自动重装)
+Pods/
+# uni-app 编译产物 (build:app test/release 写入, .gitkeep 占位不受影响)
+Main/Pandora/apps/
 # Xcode 用户数据
 xcuserdata/
 .DS_Store
