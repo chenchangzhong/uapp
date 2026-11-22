@@ -288,7 +288,7 @@ uapp run build:app apk:huawei upload
 # 编译真机自定义基座
 uapp run build:app base
 
-# 编译测试包 (默认共用 export_dev.plist; export=own 时用 export_test.plist)
+# 编译测试包 (默认共用 export_dev.plist; uapp.ios.test.export=own 时用 export_test.plist)
 uapp run build:app test
 
 # 编译 iOS 模拟器包 (x86_64, iPhone 17 Simulator)
