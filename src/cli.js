@@ -2484,13 +2484,23 @@ function buildIOSNativePluginYml(plugins) {
   plugins.forEach(({ id, dir, ios }) => {
     const group = groupOf(id)
     const iosDir = path.join(dir, 'ios')
+    // 头文件壳 framework (符号打进了包内其他 fat 静态库) 链接必然 not found, 跳过只留警告
+    const skipNoBinary = (name) => {
+      warnings.push(`插件 ${id} 的 ${name} 只有头文件没有二进制, 已跳过链接 (符号应由包内其他库提供; 若运行时缺符号请重新拷贝该 framework)`)
+    }
     const embedFrameworks = new Set(ios.embedFrameworks || [])
     const frameworks = [...(ios.frameworks || [])]
 
     // 插件 ios 根目录下的静态库，云打包同样会自动加入 target
     if (fs.existsSync(iosDir)) {
       fs.readdirSync(iosDir).forEach((file) => {
-        if (/\.(a|framework|xcframework)$/.test(file) && !frameworks.includes(file)) frameworks.push(file)
+        if (/\.(a|framework|xcframework)$/.test(file) && !frameworks.includes(file)) {
+          if (/\.(framework|xcframework)$/.test(file) && !frameworkHasBinary(path.join(iosDir, file))) {
+            skipNoBinary(file)
+            return
+          }
+          frameworks.push(file)
+        }
       })
     }
 
@@ -2520,9 +2530,11 @@ function buildIOSNativePluginYml(plugins) {
         warnings.push(`插件 ${id} 声明的 ${resolved} 在 ios/ 下不存在, 已跳过`)
         return
       }
-      // 目录在、二进制不在 (只拷了头文件) 时 xcodebuild 会报 framework not found, 提前说清楚
+      // 目录在、二进制不在 (头文件壳): 插件常把符号打进 fat 静态库再放同系列 framework 的头文件壳,
+      // 链接空壳必然 not found, 跳过只留警告
       if (!frameworkHasBinary(target)) {
-        warnings.push(`插件 ${id} 的 ${resolved} 只有头文件没有二进制, 打包会链接失败, 请重新拷贝该 framework`)
+        skipNoBinary(resolved)
+        return
       }
 
       const projectPath = toIOSProjectPath(target)
