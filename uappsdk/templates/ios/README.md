@@ -9,9 +9,19 @@
 ## 快速开始（新项目）
 
 ```bash
-uapp sdk init        # 同步本模板到 ~/.uappsdk/templates/ios
-uapp add ios         # 在 webapp 根目录执行, 生成本地模板工程
+brew install cocoapods   # 依赖统一由 SDK 里的 uniapp.podspec 提供
+uapp sdk init            # 同步本模板到 ~/.uappsdk/templates/ios
+uapp add ios             # 在 webapp 根目录执行, 生成本地模板工程
 ```
+
+工程结构仍由 XcodeGen 生成，SDK 与三方库依赖全部交给 CocoaPods（`uapp prepare` 会生成 `Podfile` 并把
+`config/base.yml` 就地改成 Pod 版，`uapp run build:app-plus ...` 会自动 `xcodegen` + `pod install`）。
+
+## 权限与 capability（entitlements）
+
+`HBuilder.entitlements` / `uapp-test.entitlements` / `uapp-release.entitlements` 由 `config/uapp_*.yml` 的
+`entitlements.properties` 生成，每次 `xcodegen` 都会重写 —— 加能力（App Groups、Associated Domains、Push 环境等）
+请改对应 yml 的 properties，不要直接改这三个文件。
 
 ## 签名占位符（生成后必须改）
 
@@ -89,4 +99,8 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
 - Xcode 27+ 已移除 `UIAccelerometer`：base.yml 勿加回 `liblibAccelerometer.a` / `liblibPGProximity.a`
 - `liblibOrientation.a` / `DCUniRecord.framework` 勿移除（运行时引用）
 - deployment target 15.0 勿改回 13.0
-- 改过 `config/*.yml` 后必须 `xcodegen generate`
+- 改过 `config/*.yml` 后必须 `xcodegen generate`（命令行打包时 `uapp run build:app-plus` 会自动执行）
+- 依赖只走 Pod：`config/base.yml` 与三个 flavor 文件里 `SDKs/SDK/**` 的手写条目都会被 prepare 删掉，模块需要什么库由 manifest 的
+  `app-plus.modules` 映射成 subspec；要加用户自己的库请写 `config/custom.yml`
+- `config/base.yml` 不再手写任何依赖（`libicucore.tbd` 也删了：podspec 与官方示例工程都没引用它，实测构建不需要）；
+  系统库全部由对应 subspec 提供，需要额外库时写进 `config/custom.yml`

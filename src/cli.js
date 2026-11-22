@@ -23,6 +23,7 @@ import { updateAndroidModuleLibs, updateAndroidNativePluginLibs, updateAndroidUn
 import { updateAndroidUtsModules, buildIOSUtsYml } from './utsModules.js'
 import { isNativePluginPath, removeEmptyModuleDirectories } from './app-resources.js'
 import { printIOSSigningInfo } from './ios-signing.js'
+import { isPodSDKRoot, resolvePodSDKRoot, ensurePodSDKFiles, ensureSignedGoogleFrameworks, podSubspecs, writePodfile, runPodInstall, readIOSTargets } from './ios-pods.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -278,7 +279,7 @@ export default function (inputArgs) {
       console.log('   export_*.plist 的 teamID / 签名证书 / profile 名由 prepare 从对应 yml 同步，只需按需改 method')
       console.log('   测试包默认共用 export_dev.plist，要跟正式包同一种导出方式就设 uapp.ios.test.export=release，')
       console.log('   要和正式包的 method 不同 (如测试包 ad-hoc) 就设 own 并改 config/export_test.plist 的 method')
-      console.log('3. cd ios && xcodegen generate')
+      console.log('3. cd ios && xcodegen generate && pod install (uapp run build 会自动执行)')
       console.log('4. 打包: uapp run build:app-plus base|test|sim|release')
       return
     }
@@ -566,6 +567,10 @@ export default function (inputArgs) {
       }
 
       if ($G.projectType === 'ios') {
+        // 构建命令不一定带 --prepare: 这里重新判定 Pod 模式, 保证 project.yml/Podfile 与实际构建方式一致
+        setupIOSPodMode()
+        // 版本号写进 config/base.yml 后 xcodegen 才会读进去; 直接用 build 命令时 prepare 没跑过
+        updateIOSVersions()
         try {
           execSync('xcodegen', { stdio: 'inherit' })
         } catch (e) {
@@ -574,10 +579,28 @@ export default function (inputArgs) {
           return
         }
         const name = fs.readFileSync(path.join($G.appDir, '/project.yml'), 'utf8').match(/^name:\s*(\S+)/m)[1]
+        const targets = readIOSTargets($G.appDir)
+        // xcodegen 重新生成工程后 Pod 接线会被覆盖, 必须重新 pod install 并改用 workspace 构建
+        // Pod 模式直接引用 SDK/Libs 里的 Google 框架: 未签名时用工程内的已签名副本补齐 (ITMS-91065)
+        try {
+          const sdkLibs = path.join(fs.realpathSync(path.join($G.appDir, 'SDKs/SDK')), 'Libs')
+          for (const item of ensureSignedGoogleFrameworks({ appDir: $G.appDir, sdkLibsDir: sdkLibs })) {
+            console.log(item.level === 'info' ? chalk.green(item.text) : chalk.yellow(item.text))
+          }
+        } catch (e) {
+          console.log(chalk.yellow(`检查 SDK 内 Google 框架签名失败: ${e.message}`))
+        }
+        try {
+          runPodInstall($G.appDir)
+        } catch (e) {
+          console.log(chalk.red(e.message))
+          return
+        }
+        const projectFlag = `-workspace ${name}.xcworkspace`
         if (buildType === 'test') {
           // gererate uapp_test.xcarchive
           execSync(
-            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "${name}-test" -archivePath out/${name}_test.xcarchive archive`,
+            `xcodebuild ${projectFlag} -destination "generic/platform=iOS" -scheme "${targets.test}" -archivePath out/${name}_test.xcarchive archive`,
             { stdio: 'inherit' }
           )
 
@@ -588,7 +611,7 @@ export default function (inputArgs) {
           )
 
           // 重命名 IPA 文件
-          const originalFilePath = path.join($G.appDir, `out/${name}-test.ipa`)
+          const originalFilePath = path.join($G.appDir, `out/${targets.test}.ipa`)
           const newFilePath = path.join(
             $G.appDir,
             `out/app-${$G.manifest.uapp.versionName}-test.ipa`
@@ -603,7 +626,7 @@ export default function (inputArgs) {
         } else if (buildType === 'base') {
           // gererate uapp_debug.xcarchive
           execSync(
-            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "HBuilder" -archivePath out/${name}_debug.xcarchive archive`,
+            `xcodebuild ${projectFlag} -destination "generic/platform=iOS" -scheme "${targets.base}" -archivePath out/${name}_debug.xcarchive archive`,
             { stdio: 'inherit' }
           )
 
@@ -613,7 +636,7 @@ export default function (inputArgs) {
             { stdio: 'inherit' }
           )
 
-          const ipaFile = path.join($G.appDir, 'out/HBuilder.ipa')
+          const ipaFile = path.join($G.appDir, `out/${targets.base}.ipa`)
           checkBuildArtifact(ipaFile)
           if (args.copy) {
             sync(
@@ -625,9 +648,9 @@ export default function (inputArgs) {
         } else if (buildType === 'sim') {
           execSync(
             `arch -x86_64 xcodebuild \
-            -project ${name}.xcodeproj \
-            -destination "platform=iOS Simulator,name=iPhone 17" \
-            -scheme "HBuilder"\
+            ${projectFlag} \
+            -destination "generic/platform=iOS Simulator" \
+            -scheme "${targets.base}"\
             -configuration Debug \
             EXCLUDED_ARCHS="arm64" \
             BUILD_LIBRARIES_FOR_DISTRIBUTION=YES \
@@ -654,7 +677,7 @@ export default function (inputArgs) {
 
           // gererate uapp_release.xcarchive
           execSync(
-            `xcodebuild -project ${name}.xcodeproj -destination "generic/platform=iOS" -scheme "${name}-release" -archivePath out/${name}_release.xcarchive archive`,
+            `xcodebuild ${projectFlag} -destination "generic/platform=iOS" -scheme "${targets.release}" -archivePath out/${name}_release.xcarchive archive`,
             { stdio: 'inherit' }
           )
 
@@ -665,7 +688,7 @@ export default function (inputArgs) {
           )
 
           // 重命名 IPA 文件
-          const originalFilePath = path.join($G.appDir, `out/${name}-release.ipa`)
+          const originalFilePath = path.join($G.appDir, `out/${targets.release}.ipa`)
           const newFilePath = path.join(
             $G.appDir,
             `out/app-${$G.manifest.uapp.versionName}-release.ipa`
@@ -1431,32 +1454,493 @@ function updateIOSMetaData() {
     }
   }
 
+  // 先确定 Pod 模式 (可能改写 base.yml) 再同步版本号
+  setupIOSPodMode()
   updateIOSVersions()
 
-  if (config) {
-    const infoPlistFile = path.join($G.appDir, 'Main/Resources/', targetFiles.infoPlist)
-    replaceInfoPlist(infoPlistFile)
-    updateIOSPrivacyDescription(infoPlistFile)
-    updateIOSLocalizations(infoPlistFile)
-    updateIOSScreenOrientation(infoPlistFile)
-    updateIOSUrlSchemes(infoPlistFile, config.googleClientId, config.googleSource)
-    updateIOSNativePlugins(infoPlistFile)
-  }
+  // 两个 Info.plist (AppDev / AppRelease) 都按 manifest 同步: 条目标题以 manifest 为准,
+  // 只更新当前构建类型会留下另一个 plist 的旧值 (release 包悄悄用旧文案)
+  syncInfoPlistContent()
+  // 能力声明按 manifest 的模块开关生成: 没勾 Push 就不该带 aps-environment,
+  // 没配苹果登录就不该带 applesignin, 否则签名时和 App ID 对不上
+  const entitlementFiles = syncIOSEntitlements()
+  if (entitlementFiles.length) console.log(`✅ iOS entitlements 已按 manifest 更新: ${entitlementFiles.join(', ')}`)
+  if (syncIOSCapabilities()) console.log('✅ iOS 能力声明已按 manifest 更新 (config/base.yml 的 SystemCapabilities)')
 
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppDev/control.xml'))
   replaceControlXml(path.join($G.appDir, 'Main/Resources/AppRelease/control.xml'))
 
-  console.log(config ? `✅ updateIOSMetaData (${rawBuildType}: ${config.package})` : '✅ updateIOSMetaData (仅版本/资源)')
+  const idfa = $G.manifest['app-plus']?.distribute?.ios?.idfa
+  const privacy = $G.manifest['app-plus']?.distribute?.ios?.privacyDescription || {}
+  if (idfa === true && !privacy.NSUserTrackingUsageDescription) {
+    console.log(chalk.yellow('manifest 里 idfa=true, 但没有配置 NSUserTrackingUsageDescription 隐私文案, 上架审核会被拒'))
+  }
+
+  console.log(config ? `✅ updateIOSMetaData (${rawBuildType}: ${config.package})` : '✅ updateIOSMetaData (未指定构建类型: 包名/appkey 未写, 版本/Info.plist/entitlements 已同步)')
+}
+
+// entitlements 里的能力项按 manifest 模块开关生成, 只动这两个键, 其它能力保持用户手写内容
+// 离线推送 (APNs) 是否启用: 勾了 Push 模块, 且推送配置里 offline=true
+function iosOfflinePushEnabled() {
+  const appPlus = $G.manifest['app-plus'] || {}
+  const hasPushModule = Object.keys(appPlus.modules || {}).some((key) => /^push$/i.test(key))
+  const push = appPlus.distribute?.sdkConfigs?.push || {}
+  const offline = Object.keys(push).some((key) => push[key] && push[key].offline === true)
+  return hasPushModule && offline
+}
+
+function syncIOSEntitlements() {
+  const modules = $G.manifest['app-plus']?.modules || {}
+  const sdkConfigs = $G.manifest['app-plus']?.distribute?.sdkConfigs || {}
+  const hasPush = iosOfflinePushEnabled()
+  const hasAppleSignIn = !!(sdkConfigs.oauth && sdkConfigs.oauth.apple)
+  const flavors = [
+    ['uapp_dev.yml', 'development'],
+    ['uapp_test.yml', 'development'],
+    ['uapp_release.yml', 'production']
+  ]
+  const changed = []
+  for (const [file, aps] of flavors) {
+    const full = path.join($G.appDir, 'config', file)
+    if (!fs.existsSync(full)) continue
+    const before = fs.readFileSync(full, 'utf8')
+    const after = writeEntitlementProperties(before, {
+      'aps-environment': hasPush ? aps : null,
+      'com.apple.developer.applesignin': hasAppleSignIn ? ['Default'] : null
+    })
+    if (after !== before) {
+      fs.writeFileSync(full, after)
+      changed.push(file)
+    }
+  }
+  return changed
+}
+
+// 在 entitlements.properties 下增删指定键; 值为 null 表示删除该键
+function writeEntitlementProperties(content, values) {
+  const lines = content.split('\n')
+  // 上一次删空时写成了 properties: {}, 重开能力要从 {} 里恢复, 两种形态都认
+  const propIndex = lines.findIndex((line) => /^\s+properties:\s*(\{\})?\s*$/.test(line))
+  if (propIndex === -1) return content
+  if (/\{\}/.test(lines[propIndex])) lines[propIndex] = lines[propIndex].replace(/\s*\{\}\s*$/, '')
+  const propIndent = /^\s*/.exec(lines[propIndex])[0].length
+  const willAdd = Object.values(values).some((value) => value !== null)
+  let keyIndent = null
+  for (let i = propIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (!line.trim()) continue
+    const indent = /^\s*/.exec(line)[0].length
+    if (indent <= propIndent) break
+    keyIndent = indent
+    break
+  }
+  if (keyIndent === null && !willAdd) {
+    // 没有能力项且本次不新增键时保持 properties: {} (空值会让 xcodegen 报 Incorrect type);
+    // 要新增键时保持裸 properties:, 键直接挂在行下
+    const next = lines.slice(propIndex + 1).find((line) => line.trim())
+    if (!next || /^\s*/.exec(next)[0].length <= propIndent) {
+      lines[propIndex] = ' '.repeat(propIndent) + 'properties: {}'
+    }
+  }
+  if (keyIndent === null) keyIndent = propIndent + 4
+
+  for (const [key, value] of Object.entries(values)) {
+    const keyRe = new RegExp(`^\\s+${key.replace(/\./g, '\\.')}\\s*:`)
+    const index = lines.findIndex((line) => keyRe.test(line))
+    if (value === null) {
+      if (index !== -1) {
+        const indent = /^\s*/.exec(lines[index])[0].length
+        let end = index + 1
+        while (end < lines.length && (lines[end].trim() === '' || /^\s*/.exec(lines[end])[0].length > indent)) {
+          if (lines[end].trim() === '' && end + 1 < lines.length && /^\s*/.exec(lines[end + 1])[0].length <= indent) break
+          end += 1
+        }
+        lines.splice(index, end - index)
+      }
+      continue
+    }
+    const pad = ' '.repeat(keyIndent)
+    const body = Array.isArray(value)
+      ? [`${pad}${key}:`, ...value.map((item) => `${pad}    - ${item}`)]
+      : [`${pad}${key}: ${value}`]
+    if (index === -1) {
+      lines.splice(propIndex + 1, 0, ...body)
+    } else {
+      const indent = /^\s*/.exec(lines[index])[0].length
+      let end = index + 1
+      while (end < lines.length && (lines[end].trim() === '' || /^\s*/.exec(lines[end])[0].length > indent)) end += 1
+      // 内容没变就不重写, 避免每次 prepare 打乱键顺序
+      const current = Array.isArray(value)
+        ? lines.slice(index + 1, end).map((line) => line.trim()).filter(Boolean).map((line) => line.replace(/^-\s*/, ''))
+        : [lines[index].slice(lines[index].indexOf(':') + 1).trim()]
+      const wanted = Array.isArray(value) ? value : [String(value)]
+      if (current.length === wanted.length && current.every((item, i) => item === String(wanted[i]))) continue
+      lines.splice(index, end - index, ...body)
+    }
+  }
+  // 删完键后 properties 变空 -> 写成 {}; properties 块到下一个缩进 <= propIndent 的非空行为止,
+  // 不能扫到文件尾: settings/sources 的子行缩进都比 propIndent 大, 恒判成还有键
+  let stillKey = false
+  for (let i = propIndex + 1; i < lines.length; i += 1) {
+    const line = lines[i]
+    if (!line.trim()) continue
+    stillKey = /^\s*/.exec(line)[0].length > propIndent
+    break
+  }
+  if (!stillKey) lines[propIndex] = ' '.repeat(propIndent) + 'properties: {}'
+  return lines.join('\n')
+}
+
+// config/base.yml 的 attributes.SystemCapabilities: 只声明 manifest 里真正启用的能力
+function syncIOSCapabilities() {
+  const file = path.join($G.appDir, 'config/base.yml')
+  if (!fs.existsSync(file)) return false
+  const before = fs.readFileSync(file, 'utf8')
+  const lines = before.split('\n')
+  const caps = []
+  if (iosOfflinePushEnabled()) caps.push('com.apple.Push')
+  const oauth = $G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth
+  if (oauth && oauth.apple) caps.push('com.apple.AppleIDSignIn')
+  const block = caps.length
+    ? ['        attributes:', '            SystemCapabilities:', ...caps.map((cap) => `                ${cap}: 1`)]
+    : []
+  const start = lines.findIndex((line) => /^ {8}attributes:\s*$/.test(line))
+  if (start === -1) {
+    // 模板里没有 attributes 块: 需要能力时插在 settings: 之前
+    if (!block.length) return false
+    const at = lines.findIndex((line) => /^ {8}settings:\s*$/.test(line))
+    if (at === -1) return false
+    lines.splice(at, 0, ...block)
+    fs.writeFileSync(file, lines.join('\n'))
+    return true
+  }
+  let end = start + 1
+  while (end < lines.length && (lines[end].trim() === '' || /^\s*/.exec(lines[end])[0].length > 8)) end += 1
+  if (lines.slice(start, end).join('\n') === block.join('\n')) return false
+  lines.splice(start, end - start, ...block)
+  fs.writeFileSync(file, lines.join('\n'))
+  return true
 }
 
 function updateIOSVersions() {
-  let baseYamlFile = path.join($G.appDir, 'config/base.yml')
-  let content = fs.readFileSync(baseYamlFile, 'utf8')
-  let versionName = normalizeVersionName($G.manifest.uapp.versionName)
-
+  const versionName = normalizeVersionName($G.manifest.uapp.versionName)
+  const file = path.join($G.appDir, 'config', 'base.yml')
+  if (!fs.existsSync(file)) return
+  let content = fs.readFileSync(file, 'utf8')
   content = content.replace(/(MARKETING_VERSION: )(.*)/g, '$1' + versionName)
   content = content.replace(/(CURRENT_PROJECT_VERSION: )(.*)/g, '$1' + $G.manifest.uapp.versionCode)
-  fs.writeFileSync(baseYamlFile, content)
+  fs.writeFileSync(file, content)
+}
+
+// 两个 Info.plist: AppDev (base/test/sim) 与 AppRelease (release).
+// 应用名、appkey、权限文案、本地化、方向、URL scheme 都以 manifest 为准, 两个文件一起同步,
+// 否则换构建类型时另一个 plist 会留着上一次的旧值
+function syncInfoPlistContent() {
+  const flavors = [
+    ['base', 'AppDev/Info.plist'],
+    ['release', 'AppRelease/Info.plist']
+  ]
+  for (const [buildType, rel] of flavors) {
+    const file = path.join($G.appDir, 'Main/Resources', rel)
+    if (!fs.existsSync(file)) continue
+    const config = resolveIOSConfig(buildType)
+    replaceInfoPlist(file, config.appkey || $G.manifest.uapp.appkey)
+    updateIOSPrivacyDescription(file)
+    updateIOSLocalizations(file)
+    updateIOSScreenOrientation(file)
+    updateIOSUrlSchemes(file, config.googleClientId, config.googleSource)
+    updateIOSNativePlugins(file)
+  }
+}
+
+// Pod 模式下工程的 HEADER_SEARCH_PATHS 会覆盖 Pods 的 xcconfig, 导致 SDK 头文件路径丢失,
+// 给每一处手写的 HEADER_SEARCH_PATHS 补 $(inherited) (已有则跳过)
+function ensureInheritedHeaderPaths() {
+  const file = path.join($G.appDir, 'config', 'custom.yml')
+  if (!fs.existsSync(file)) return 0
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  let fixed = 0
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^(\s+)HEADER_SEARCH_PATHS:\s*$/.exec(lines[i])
+    if (!match) continue
+    // 沿用已有列表项的缩进 (列表项通常比键多 2~4 格, 不能假设固定值)
+    let indent = `${match[1]}  `
+    let j = i + 1
+    if (j < lines.length) {
+      const itemIndent = /^(\s*)- /.exec(lines[j])
+      if (itemIndent) indent = itemIndent[1]
+    }
+    let hasInherited = false
+    while (j < lines.length && /^\s+- /.test(lines[j])) {
+      if (lines[j].includes('$(inherited)')) hasInherited = true
+      j++
+    }
+    if (hasInherited) continue
+    lines.splice(i + 1, 0, `${indent}- "$(inherited)"`)
+    fixed++
+    i++
+  }
+  if (fixed) fs.writeFileSync(file, lines.join('\n'))
+  return fixed
+}
+
+// dependencies:/sources: 条目删空后, 只剩键名会让 xcodegen 报 expected Array<Any>, 把空键一并删掉
+function dropEmptyCollectionKeys(lines) {
+  const out = []
+  for (let i = 0; i < lines.length; i++) {
+    if (/^\s*(dependencies|sources):\s*$/.test(lines[i])) {
+      let j = i + 1
+      while (j < lines.length && lines[j].trim() === '') j++
+      const keyIndent = /^\s*/.exec(lines[i])[0].length
+      const nextIndent = j < lines.length ? /^\s*/.exec(lines[j])[0].length : -1
+      if (nextIndent <= keyIndent) continue
+    }
+    out.push(lines[i])
+  }
+  return out
+}
+
+// 删掉空的分组注释块 (# X-start 紧跟 # X-end): Pod 版 base.yml 去掉 SDK 条目后这批注释会空掉
+function dropEmptyMarkerBlocks(lines) {
+  let changed = true
+  while (changed) {
+    changed = false
+    const out = []
+    for (let i = 0; i < lines.length; i++) {
+      const start = /^(\s*)# (.+)-start\s*$/.exec(lines[i])
+      if (start) {
+        let j = i + 1
+        while (j < lines.length && lines[j].trim() === '') j++
+        const end = j < lines.length ? /^(\s*)# (.+)-end\s*$/.exec(lines[j]) : null
+        if (end && end[2] === start[2]) {
+          i = j
+          changed = true
+          continue
+        }
+      }
+      out.push(lines[i])
+    }
+    lines = out
+  }
+  return lines
+}
+
+// 单一 base.yml: Pod 模式下就地删掉手写 SDK 依赖与搜索路径, 其余 target 配置保持不动。
+// 幂等: 已经是 Pod 版时第二次调用不会改动文件。
+function podifyConfigYml(file, { keepLdf }) {
+  if (!fs.existsSync(file)) return { changed: false, removed: 0, customSettings: [] }
+  const original = fs.readFileSync(file, 'utf8')
+  const lines = original.split('\n')
+  const skipSettings = new Set(['FRAMEWORK_SEARCH_PATHS', 'LIBRARY_SEARCH_PATHS', 'HEADER_SEARCH_PATHS'])
+  const kept = []
+  let removed = 0
+  // 整键删除会带走所有非 SDK 路径 (含模板默认的系统变量), 记下来由 setupIOSPodMode 提示
+  const customSettings = []
+  let sawLdf = false
+  let ldfIndent = ''
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    const entry = /^(\s+)- (?:framework|path):\s+\S*SDKs\/SDK\//.exec(line)
+    if (entry) {
+      removed++
+      const indent = entry[1].length
+      // 条目附带的续行 (embed/codeSign/buildPhase/weak 等)
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1]
+        if (next.trim() === '') break
+        if (/^\s*- /.test(next)) break
+        if (/^\s*/.exec(next)[0].length <= indent) break
+        i++
+      }
+      continue
+    }
+    // 模板早期遗留的自定义构建项, 没有任何地方读它 (显示名在 Info.plist 的 CFBundleDisplayName)
+    if (/^\s+DISPLAY_NAME:/.test(line)) {
+      removed++
+      continue
+    }
+    const setting = /^(\s+)([A-Z_]+):\s*(.*)$/.exec(line)
+    if (setting && skipSettings.has(setting[2])) {
+      removed++
+      const indent = setting[1].length
+      while (i + 1 < lines.length) {
+        const next = lines[i + 1]
+        if (next.trim() === '') break
+        if (/^\s*/.exec(next)[0].length <= indent) break
+        if (/^\s+- /.test(next) && !/SDKs\/SDK\//.test(next) && !/\$\(inherited\)/.test(next)) {
+          customSettings.push(`${setting[2]} 的 ${next.trim()}`)
+        }
+        i++
+      }
+      continue
+    }
+    // -ObjC 仍要保留 (分类方法), 但要带上 $(inherited), 否则会盖掉 Pods xcconfig 里的其他链接参数;
+    // flavor 文件里如果有 OTHER_LDFLAGS 同样会覆盖 xcconfig, 所以四个文件都按这个规则改
+    const ldf = /^(\s+)OTHER_LDFLAGS:\s*(.+)$/.exec(line)
+    if (ldf) {
+      sawLdf = true
+      ldfIndent = ldf[1]
+      const value = ldf[2].trim().replace(/^'(.*)'$/, '$1')
+      const flags = value.split(/\s+/).filter((flag) => flag && flag !== '$(inherited)')
+      if (!flags.includes('-ObjC')) flags.unshift('-ObjC')
+      kept.push(`${ldf[1]}OTHER_LDFLAGS: '$(inherited) ${flags.join(' ')}'`)
+      continue
+    }
+    const defs = /^(\s+)GCC_PREPROCESSOR_DEFINITIONS:\s*(.+)$/.exec(line)
+    if (defs && !defs[2].includes('$(inherited)')) {
+      const value = defs[2].trim().replace(/^'(.*)'$/, '$1')
+      kept.push(`${defs[1]}GCC_PREPROCESSOR_DEFINITIONS: '$(inherited) ${value}'`)
+      continue
+    }
+    kept.push(line)
+  }
+  let merged = dropEmptyCollectionKeys(kept)
+  // 老工程可能上一版 Pod 化时把 OTHER_LDFLAGS 整行删了, 这里补回来
+  if (keepLdf && !sawLdf) {
+    const index = merged.findIndex((line) => /GCC_PREPROCESSOR_DEFINITIONS:/.test(line))
+    if (index >= 0) {
+      const indent = /^\s*/.exec(merged[index])[0]
+      merged = [...merged.slice(0, index + 1), `${indent}OTHER_LDFLAGS: '$(inherited) -ObjC'`, ...merged.slice(index + 1)]
+    }
+  }
+  const content = dropEmptyMarkerBlocks(merged).join('\n')
+  if (content === original) return { changed: false, removed: 0, customSettings: [] }
+  fs.writeFileSync(file, content)
+  return { changed: true, removed, customSettings }
+}
+
+// base.yml 与三个 flavor 配置都可能带手写 SDK 依赖: 一次性清掉, 否则 flavor 里的条目会绕过 Pod
+function podifyConfigs() {
+  const files = ['base.yml', 'uapp_dev.yml', 'uapp_test.yml', 'uapp_release.yml']
+  const changedFiles = []
+  let removed = 0
+  const customSettings = []
+  for (const name of files) {
+    const result = podifyConfigYml(path.join($G.appDir, 'config', name), { keepLdf: name === 'base.yml' })
+    customSettings.push(...result.customSettings)
+    if (result.changed) {
+      changedFiles.push(`config/${name}`)
+      removed += result.removed
+    }
+  }
+  return { changed: changedFiles.length > 0, changedFiles, removed, customSettings }
+}
+
+// Pod 模式专属: 删掉 custom.yml 里手写的 SDK 依赖条目 (含其 embed/codeSign 续行),
+// 这些库现在由 uniapp.podspec 提供, 留着会和 Pod 重复链接/重复嵌入
+function stripPodModeSDKEntries() {
+  const file = path.join($G.appDir, 'config', 'custom.yml')
+  if (!fs.existsSync(file)) return []
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  const removed = []
+  const kept = []
+  for (let i = 0; i < lines.length; i++) {
+    const match = /^\s+- (?:framework|path):\s+(SDKs\/(?:SDK|GoogleOAuth)\/\S+)/.exec(lines[i])
+    if (!match) {
+      kept.push(lines[i])
+      continue
+    }
+    removed.push(match[1])
+    const entryIndent = /^\s*/.exec(lines[i])[0].length
+    // 只吃比条目更深的续行 (embed/codeSign/buildPhase 等), 遇到同级键/下一个条目就停
+    while (i + 1 < lines.length) {
+      const next = lines[i + 1]
+      if (next.trim() === '') break
+      if (/^\s*/.exec(next)[0].length <= entryIndent) break
+      i++
+    }
+  }
+  if (removed.length) fs.writeFileSync(file, dropEmptyCollectionKeys(kept).join('\n'))
+  return removed
+}
+
+// 工程里的 SDKs/SDK 软链: 默认 SDK 目录只有 podspec 没有 SDK/ 时, 改指配置的完整 SDK
+function relinkProjectSDK(sdkDir) {
+  const link = path.join($G.appDir, 'SDKs/SDK')
+  let stat = null
+  try {
+    stat = fs.lstatSync(link)
+  } catch (e) {
+    stat = null
+  }
+  // 用户把真实 SDK 目录放进工程时不动它, 只有软链才改指向
+  if (stat && !stat.isSymbolicLink()) {
+    console.log(chalk.yellow(`${link} 不是软链, 保留原样; Pod 仍从该目录的 uniapp.podspec 解析依赖`))
+    return
+  }
+  if (stat) fs.rmSync(link, { recursive: true, force: true })
+  fs.mkdirSync(path.dirname(link), { recursive: true })
+  fs.symlinkSync(sdkDir, link, 'dir')
+}
+
+// Pod 模式: SDK 依赖交给官方 uniapp.podspec, 工程结构与三套 target 仍由 XcodeGen 负责。
+// 前提是完整离线 SDK 根目录 (含 uniapp.podspec): 默认 ~/.uappsdk/ios, 可用 uapp config set ios.sdk 指定
+function setupIOSPodMode() {
+  const configured = $G.config?.['ios.sdk']
+  let sdkRoot = isPodSDKRoot(configured) ? configured : resolvePodSDKRoot($G.sdkHomeDir)
+  // 完整 SDK 在别处配置时, 把 pod 依赖需要的 uniapp.podspec 与 license.md 补进 uapp 的 SDK 目录,
+  // 之后就不再依赖这条 config, 换台机器只拷 SDK/ 也能直接用 Pod 模式
+  if (isPodSDKRoot(configured) && !resolvePodSDKRoot($G.sdkHomeDir)) {
+    const ensured = ensurePodSDKFiles({ sdkHomeDir: $G.sdkHomeDir, sourceRoot: configured })
+    if (ensured?.root) {
+      sdkRoot = ensured.root
+      console.log(`✅ 已从 ${configured} 复制 uniapp.podspec 与 license.md 到 ${ensured.root}`)
+      if (ensured.versionMismatch) {
+        console.log(chalk.yellow(`⚠️ 两处 SDK 版本不一致 (${ensured.sourceVersion} vs ${ensured.targetVersion}), 请确认 ${path.join(ensured.root, 'SDK')} 与 podspec 配套`))
+      }
+    } else if (ensured?.sdkMissing && fs.existsSync(path.join(configured, 'SDK'))) {
+      // 默认目录没有 SDK/ 时不能只补 podspec (podspec 的 lib 路径是相对它自己的 SDK/Libs), 直接用配置的完整 SDK
+      sdkRoot = configured
+      relinkProjectSDK(path.join(configured, 'SDK'))
+      console.log(`✅ 工程 SDK 指向 ${configured}/SDK`)
+    }
+  }
+  // SDK 依赖只有 uniapp.podspec 一个来源: 找不到完整 SDK 就停下, 不再退回手写依赖表
+  if (!sdkRoot) {
+    if (configured) {
+      console.log(chalk.red(`uapp config 的 ios.sdk 不是完整 iOS 离线 SDK (需要 uniapp.podspec 与 SDK/): ${configured}`))
+    } else {
+      console.log(chalk.red(`未找到完整的 iOS 离线 SDK: ${path.join($G.sdkHomeDir, 'ios')} 缺少 uniapp.podspec 或 SDK/`))
+    }
+    console.log(chalk.red('iOS 构建依赖 CocoaPods, 请把完整离线 SDK 放到 ~/.uappsdk/ios, 或执行 uapp config set ios.sdk <包含 uniapp.podspec 与 SDK/ 的目录>'))
+    process.exit(1)
+  }
+  // 只用一份 config/base.yml: Pod 模式下就地删掉手写 SDK 依赖与搜索路径 (幂等),
+  // 依赖只有 Pod 一条通道: base.yml 就地改成 Pod 版 (无手写 SDK 依赖), 不再维护 base-pod.yml
+  const podified = podifyConfigs()
+  if (podified.changed) {
+    console.log(chalk.yellow(`Pod 模式已把 ${podified.changedFiles.join(', ')} 改成 Pod 版 (删除 ${podified.removed} 条手写 SDK 依赖/搜索路径)`))
+  }
+  if (podified.customSettings.length) {
+    console.log(chalk.yellow(`⚠️ FRAMEWORK/LIBRARY/HEADER_SEARCH_PATHS 是整键删除, 以下非 SDK 条目也被带走: ${podified.customSettings.join(' ; ')} (如仍需要, 请移到 Podfile 的 post_install 或 Pods xcconfig)`))
+  }
+  // 老工程可能还停在 base-pod.yml 的 include 上
+  const projectFile = path.join($G.appDir, 'project.yml')
+  let projectContent = fs.readFileSync(projectFile, 'utf8')
+  if (projectContent.includes('path: config/base-pod.yml')) {
+    fs.writeFileSync(projectFile, projectContent.replace('path: config/base-pod.yml', 'path: config/base.yml'))
+  }
+
+  // 手写依赖表必须退场: custom.yml 里指向 SDK/Libs、SDK/Bundles 的条目会与 podspec 重复,
+  // 自签的 SDKs/GoogleOAuth 副本同理 (文件保留, 打包前由 ensureSignedGoogleFrameworks 同步回 SDK)
+  const inheritedAdded = ensureInheritedHeaderPaths()
+  if (inheritedAdded) {
+    console.log(chalk.yellow(`Pod 模式已给 config/custom.yml 的 ${inheritedAdded} 处 HEADER_SEARCH_PATHS 补上 $(inherited) (否则会覆盖 Pods 的头文件路径)`))
+  }
+
+  const stripped = stripPodModeSDKEntries()
+  if (stripped.length) {
+    console.log(chalk.yellow(`Pod 模式已从 config/custom.yml 移除手写 SDK 依赖 (改由 uniapp.podspec 提供): ${stripped.join(', ')}`))
+  }
+
+  // Pod 只负责依赖: 隐私文案、三方 key、feature.plist、UTS 仍走 uapp 原有逻辑
+  const { subspecs, warnings: subspecWarnings } = podSubspecs({
+    modules: $G.manifest['app-plus']?.modules,
+    sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs
+  })
+  writePodfile({ appDir: $G.appDir, subspecs, targets: readIOSTargets($G.appDir) })
+  console.log(`✅ iOS Pod 模式 (依赖来自 uniapp.podspec: ${subspecs.join(', ')})`)
+  subspecWarnings.forEach((warning) => console.log(chalk.yellow(warning)))
 }
 
 function updateIOSBundleId(ymlName, bundleId) {
@@ -1980,6 +2464,7 @@ function toIOSProjectPath(target) {
 // 插件 frameworks / resources 转换成 xcodegen 的 targetTemplates.uAppBase 配置
 function buildIOSNativePluginYml(plugins) {
   const groups = new Map()
+  const warnings = []
   const groupOf = (name) => {
     if (!groups.has(name)) groups.set(name, { name, dependencies: [], sources: [] })
     return groups.get(name)
@@ -2009,21 +2494,42 @@ function buildIOSNativePluginYml(plugins) {
       })
     }
 
-    frameworks.forEach((name) => {
-      const target = path.join(iosDir, name)
+    // 插件升级时 package.json 里的 .xcframework 可能已换成 .framework (或反之),
+    // 以磁盘上实际存在的为准, 避免生成一条指向不存在路径的依赖让 xcodebuild 直接失败
+    const resolveFramework = (name) => {
+      if (fs.existsSync(path.join(iosDir, name))) return name
+      const swapped = name.endsWith('.xcframework')
+        ? name.replace(/\.xcframework$/, '.framework')
+        : name.endsWith('.framework') ? name.replace(/\.framework$/, '.xcframework') : ''
+      return swapped && fs.existsSync(path.join(iosDir, swapped)) ? swapped : name
+    }
+
+    frameworks.map(resolveFramework).forEach((resolved, index) => {
+      const name = frameworks[index]
+      const target = path.join(iosDir, resolved)
       const exists = fs.existsSync(target)
+      // 没有对应文件、名字又是纯系统框架名 (AdSupport.framework / libz.tbd) -> 交给 SDK 链接
       if (!exists && (/\.(tbd|dylib)$/.test(name) || (!name.includes('/') && name.endsWith('.framework')))) {
         if (seenDependencies.has(name)) return
         seenDependencies.add(name)
         group.dependencies.push(`- sdk: ${name}`)
         return
       }
+      // .xcframework 只能来自插件目录, 找不到就是插件文件不完整
+      if (!exists) {
+        warnings.push(`插件 ${id} 声明的 ${resolved} 在 ios/ 下不存在, 已跳过`)
+        return
+      }
+      // 目录在、二进制不在 (只拷了头文件) 时 xcodebuild 会报 framework not found, 提前说清楚
+      if (!frameworkHasBinary(target)) {
+        warnings.push(`插件 ${id} 的 ${resolved} 只有头文件没有二进制, 打包会链接失败, 请重新拷贝该 framework`)
+      }
 
       const projectPath = toIOSProjectPath(target)
       if (seenDependencies.has(projectPath)) return
       seenDependencies.add(projectPath)
 
-      const embed = exists && embedFrameworks.has(name) && /\.(framework|xcframework)$/.test(name)
+      const embed = exists && (embedFrameworks.has(resolved) || embedFrameworks.has(name)) && /\.(framework|xcframework)$/.test(resolved)
       group.dependencies.push(`- framework: ${projectPath}`, `  embed: ${embed}`, `  codeSign: ${embed}`)
     })
 
@@ -2041,7 +2547,27 @@ function buildIOSNativePluginYml(plugins) {
     })
   })
 
-  return { groups: [...groups.values()] }
+  return { groups: [...groups.values()], warnings }
+}
+
+// framework / xcframework 目录存在时, 二进制是否也真的在 (只拷了 Headers 的残包会让链接阶段才报错)
+function frameworkHasBinary(target) {
+  const name = path.basename(target)
+  try {
+    if (name.endsWith('.xcframework')) {
+      // xcframework 顶层只有 Info.plist 和平台切片目录, 二进制在切片内的 .framework/.a/.dylib
+      return fs.readdirSync(target).some((entry) => {
+        if (entry === 'Info.plist' || !fs.statSync(path.join(target, entry)).isDirectory()) return false
+        return fs.readdirSync(path.join(target, entry)).some((inner) => /\.(framework|a|dylib)$/.test(inner))
+      })
+    }
+    if (name.endsWith('.framework')) {
+      return fs.existsSync(path.join(target, name.slice(0, -'.framework'.length)))
+    }
+  } catch (e) {
+    return false
+  }
+  return true
 }
 
 // 模块依赖与原生插件依赖按模块名合并，组内按依赖路径 / sdk 名去重
@@ -2557,36 +3083,53 @@ function printModuleNotice() {
   }
 }
 
-function updateIOSNativePlugins(plistFile) {
-  const plugins = getIOSNativePlugins()
+// custom.yml / UTS / feature.plist 的生成与具体 Info.plist 无关, AppDev / AppRelease 两个
+// plist 各调一次 updateIOSNativePlugins, 共享部分用标记保证一次 prepare 只跑一遍
+let iosNativePluginsPrepared = false
+function prepareIOSNativePlugins(plugins) {
+  if (iosNativePluginsPrepared) return
+  iosNativePluginsPrepared = true
+  // SDK 依赖交给 uniapp.podspec; 这里只借 buildIOSModuleYml 做隐私描述校验, 不写依赖
   const moduleYml = buildIOSModuleYml({
     modules: $G.manifest['app-plus']?.modules,
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
     privacyDescription: $G.manifest['app-plus']?.distribute?.ios?.privacyDescription,
     appDir: $G.appDir,
   })
+  moduleYml.groups = []
   if (moduleYml.errors.length) {
     moduleYml.errors.forEach((error) => console.log(chalk.red(error)))
     console.log(chalk.red('❌ iOS 模块缺少隐私描述，打包中止'))
     process.exit(1)
   }
   // UTS 插件 -> utsplugins/<id>/ 下的 framework -> config/custom.yml
+  // Pod 模式也走这条链路: 官方 uniapp_uts_plugins.rb 只认 <id>/utssdk/app-ios 布局, 与 uapp 的导出目录不一致
   const utsYml = buildIOSUtsYml({
     appDir: $G.appDir,
     webAppDir: $G.webAppDir,
   })
-  updateIOSCustomYml(mergeIOSYml(moduleYml, buildIOSNativePluginYml(plugins), utsYml))
+  const pluginYml = buildIOSNativePluginYml(plugins)
+  updateIOSCustomYml(mergeIOSYml(moduleYml, pluginYml, utsYml))
   const featurePatch = patchFeaturePlist({
     plistPath: path.join($G.appDir, 'SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist'),
     modules: $G.manifest['app-plus']?.modules,
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
   })
   $G.iosModuleNotice = {
-    warnings: [...moduleYml.warnings, ...featurePatch.warnings, ...utsYml.warnings],
+    warnings: [...moduleYml.warnings, ...pluginYml.warnings, ...featurePatch.warnings, ...utsYml.warnings],
     added: featurePatch.added,
     utsPlugins: utsYml.groups.filter((group) => !group.skipped).map((group) => group.name),
     utsSkippedPlugins: utsYml.groups.filter((group) => group.skipped).map((group) => group.name),
   }
+  if (plugins.length) {
+    warnEmptyIOSPluginParameters(plugins)
+    console.log(`✅ updateIOSNativePlugins (${plugins.map((plugin) => plugin.id).join(', ')})`)
+  }
+}
+
+function updateIOSNativePlugins(plistFile) {
+  const plugins = getIOSNativePlugins()
+  prepareIOSNativePlugins(plugins)
   updateIOSUniplugins(plistFile, plugins)
   if (!plugins.length) return
 
@@ -2599,15 +3142,13 @@ function updateIOSNativePlugins(plistFile) {
   }
 
   fs.writeFileSync(plistFile, updated)
-  warnEmptyIOSPluginParameters(plugins)
   warnMissingIOSPluginPrivacies(updated, plugins)
-  console.log(`✅ updateIOSNativePlugins (${plugins.map((plugin) => plugin.id).join(', ')})`)
 }
 
-function replaceInfoPlist(plistFile) {
+function replaceInfoPlist(plistFile, appkey = $G.manifest.uapp.appkey) {
   let content = fs.readFileSync(plistFile, 'utf8')
   let re = /(<key>dcloud_appkey<\/key>\n.+?<string>)(.*?)(<\/string>)/g
-  content = content.replace(re, '$1' + $G.manifest.uapp.appkey + '$3')
+  content = content.replace(re, '$1' + appkey + '$3')
 
   // replace ios and wexin meanwhile
   // 已知空操作 (暂不处理): 模板 Info.plist 里没有 UniversalLinks / weixin / appSecret 这些键,

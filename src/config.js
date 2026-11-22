@@ -5,6 +5,8 @@ import path from 'node:path'
 const types = {
   'hbx.dir': 'directory',
   'wx.dir': 'directory',
+  // 完整 iOS 离线 SDK 根目录 (含 uniapp.podspec), 留空时用 ~/.uappsdk/ios
+  'ios.sdk': 'directory',
   node: 'file'
 }
 const arity = { set: 3, get: 2, list: 1, delete: 2 }

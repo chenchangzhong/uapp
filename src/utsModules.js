@@ -778,6 +778,59 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
   return result
 }
 
+// 导出目录里可能带着编译好的 framework (Frameworks/ Libs/ 或根目录), 有就同步到 ios/utsplugins/<id>,
+// 保证插件改了之后打包用的是新产物; 只有源码时提示怎么拿到产物
+function syncUtsFrameworkFromExport({ dir, platformDir, id, warnings }) {
+  const frameworkNamesIn = (root) => {
+    if (!fs.existsSync(root)) return []
+    return fs.readdirSync(root).filter((name) => /\.(framework|xcframework)$/.test(name))
+  }
+  const sources = [platformDir, path.join(platformDir, 'Frameworks'), path.join(platformDir, 'Libs')]
+  const source = sources.find((root) => frameworkNamesIn(root).length > 0)
+  const dirHasFramework = frameworkNamesIn(dir).length > 0
+  if (!source && !dirHasFramework) {
+    if (fs.existsSync(path.join(platformDir, 'src'))) {
+      warnings.push(`UTS插件 ${id}: 导出目录只有源码 (utssdk/app-ios/src), 没有编译好的 framework; 如果它之前提交过, 先 git checkout -- ios/utsplugins/${id} 恢复, 否则用 Xcode 重新构建`)
+    } else {
+      warnings.push(`UTS插件 ${id}: 找不到 ios/utsplugins/${id}, 也没有可同步的 framework (参考 https://doc.dcloud.net.cn/uni-app-x/native/use/iosuts.html)`)
+    }
+    return
+  }
+  // 目标为空, 或导出目录的产物比目标里的新 (重新构建过) 都要同步;
+  // cpSync 不保留源时间戳, 拷完目标更新, 下一轮不会重复拷
+  const staleFramework = source && frameworkNamesIn(source).some((name) => {
+    const target = path.join(dir, name)
+    if (!fs.existsSync(target)) return true
+    return fs.statSync(path.join(source, name)).mtimeMs > fs.statSync(target).mtimeMs
+  })
+  if (source && (!dirHasFramework || staleFramework)) {
+    fs.mkdirSync(dir, { recursive: true })
+    for (const name of frameworkNamesIn(source)) {
+      fs.rmSync(path.join(dir, name), { recursive: true, force: true })
+      fs.cpSync(path.join(source, name), path.join(dir, name), { recursive: true })
+    }
+    warnings.push(`UTS插件 ${id}: 已从导出目录同步 framework 到 ios/utsplugins/${id}`)
+  }
+  // 源码比产物新 -> 产物可能过期
+  const srcDir = path.join(platformDir, 'src')
+  if (!fs.existsSync(srcDir)) return
+  let newest = 0
+  const walk = (rel) => {
+    const from = path.join(srcDir, rel)
+    const stat = fs.statSync(from)
+    if (stat.isDirectory()) {
+      for (const name of fs.readdirSync(from)) walk(path.join(rel, name))
+      return
+    }
+    newest = Math.max(newest, stat.mtimeMs)
+  }
+  for (const name of fs.readdirSync(srcDir)) walk(name)
+  const frameworkTime = Math.max(...frameworkNamesIn(dir).map((name) => fs.statSync(path.join(dir, name)).mtimeMs))
+  if (newest > frameworkTime) {
+    warnings.push(`UTS插件 ${id}: 导出源码比 ios/utsplugins/${id} 里的 framework 新, 打包前请重新构建`)
+  }
+}
+
 // ios 侧: 扫 utsplugins/<id>/ 下的 framework, 生成 custom.yml 组
 // framework 已在 config/custom.yml 里配置过的组标记 skipped, 提示层据此区分「已写入/未改动」
 export function buildIOSUtsYml({ appDir, webAppDir }) {
@@ -787,10 +840,9 @@ export function buildIOSUtsYml({ appDir, webAppDir }) {
   const customYml = fs.existsSync(customYmlFile) ? fs.readFileSync(customYmlFile, 'utf8') : ''
   for (const plugin of plugins) {
     const dir = path.join(appDir, 'utsplugins', plugin.id)
-    if (!fs.existsSync(dir)) {
-      warnings.push(`UTS插件 ${plugin.id}: ios/utsplugins/${plugin.id} 目录不存在, 请先用 Xcode 构建插件 framework (参考 https://doc.dcloud.net.cn/uni-app-x/native/use/iosuts.html)`)
-      continue
-    }
+    // 导出目录里有编译好的 framework 就直接同步过来, 只剩源码时给出可操作提示
+    syncUtsFrameworkFromExport({ dir, platformDir: plugin.platformDir, id: plugin.id, warnings })
+    if (!fs.existsSync(dir)) continue
     const frameworks = fs.readdirSync(dir).filter((name) => name.endsWith('.framework') && fs.statSync(path.join(dir, name)).isDirectory())
     const xcframeworks = fs.readdirSync(dir).filter((name) => name.endsWith('.xcframework'))
     for (const name of xcframeworks) {

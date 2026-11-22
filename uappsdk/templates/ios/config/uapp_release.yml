@@ -3,6 +3,7 @@ targets:
         scheme: {}
         templates:
             - uAppBase
+        # entitlements 由这里的 properties 生成, 不要直接改 .entitlements 文件
         entitlements:
             path: uapp-release.entitlements
             properties:

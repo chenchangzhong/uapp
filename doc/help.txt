@@ -44,6 +44,7 @@ uapp 通用命令🔥
   - 配置 HBuilderX, node 和 微信安装环境
     uapp config set hbx.dir "C:\Program Files (x86)\HBuilderX"
     uapp config set wx.dir "C:\Program Files (x86)\Tencent\微信web开发者工具"
+    uapp config set ios.sdk /path/to/ios-SDK   # 完整 iOS 离线 SDK 根目录 (含 uniapp.podspec 与 SDK/), iOS 构建必需
     uapp config get hbx.dir          # 读取已保存的值，未配置时返回非零退出码
     uapp config list                 # JSON 格式列出已保存配置；也可直接 uapp config
     uapp config delete hbx.dir       # 删除显式配置，恢复运行时默认探测

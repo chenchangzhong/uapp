@@ -188,7 +188,11 @@ uapp new YourProject
 
 > 如果当前目录已有 android 或 ios 目录，会提示错误，可将其改名后，再执行命令
 
-iOS 的工程化一直都不太方便，通常都是用的 CocoaPods，但不适合 DCloud离线SDK 的发布形式。经过我们在产品中的不断实践，最终选择了 XCodeGen。
+iOS 的工程化一直都不太方便。uapp 用 [XcodeGen](https://github.com/yonaskolb/XcodeGen) 生成工程（`project.yml` 描述结构，避免手改 `.xcodeproj`），**SDK 与三方库依赖统一交给 CocoaPods 的 `uniapp.podspec`**：
+
+- 需要先安装 CocoaPods（`brew install cocoapods`）；按 manifest 的模块映射成 subspec（`Core`、`CameraGallery`、`Oauth-Wechat` …），`pod install` 后用 `.xcworkspace` 构建，`base/test/sim/release` 四套流程和三套 target 不变；
+- 隐私文案、三方 key、URL scheme、`feature.plist`、原生插件、UTS 插件、签名仍由 uapp 原有逻辑处理，Pod 只管依赖；
+- 前提是完整 iOS 离线 SDK（根目录含 `uniapp.podspec` 与 `SDK/`），默认取 `~/.uappsdk/ios`，可用 `uapp config set ios.sdk <目录>` 指定。
 
 👇 **uapp 离线打包并发布 iOS 自定义基座**
 
@@ -464,7 +468,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 
 ### 🧩 iOS 模块依赖（modules）
 
-官方说明 `app-plus.modules` 仅云打包生效，离线打包需要自己往原生工程加依赖。uapp 在 iOS 构建时会读取 `modules`，把对应依赖写进 `config/custom.yml` 的 `targetTemplates.uAppBase`（按模块名写进 `# <模块名>-start` 标记块；`uAppBase` 已被手写内容占用时只合并、不覆盖，见下文）：
+离线打包不需要再手动维护依赖表：uapp 在 iOS 构建时读取 `app-plus.modules` 与 `app-plus.distribute.sdkConfigs`，映射成离线 SDK 里 `uniapp.podspec` 的 subspec 写进生成的 `Podfile`，由 CocoaPods 负责链接；`config/custom.yml` 只保留原生插件与 UTS 插件。
 
 ```json5
 {
@@ -477,14 +481,13 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 }
 ```
 
-- 基础模块：`Barcode`、`Bluetooth`、`Camera`、`Contact`、`FaceID`、`Fingerprint`、`iBeacon`、`LivePusher`、`Messaging`、`Record`、`SQLite`、`UIWebview`、`VideoPlayer`、`Orientation`
-- 三方模块按 `sdkConfigs` 的平台子键选依赖：`Geolocation`（`geolocation`）、`Maps`（`maps`）、`OAuth`（`oauth`）、`Payment`（`payment`）、`Push`（`push`）、`Share`（`share`）、`Speech`（`speech`）、`Statistic`（`statics`）
-- 三方模块启用了但 `sdkConfigs` 没配平台，或平台没有对应映射时只告警，不猜依赖
-- `Push` 只处理 iOS 需要的部分：`push.igexin`（个推，在线推送）始终写入；`push.unipush`（uniPush 2.0）只有 `offline: true`（勾了离线推送）才写 iOS 原生依赖，仅在线推送时用 jssdk 不集成原生 SDK；`push.fcm`（谷歌推送，官方「Google Cloud Message 3.3.7+」独立集成）写 `liblibPush.a`+`libFCMPush.a`+`FirebaseCore`/`FirebaseCoreInternal`/`FirebaseInstallations`/`GoogleDataTransport`/`GoogleUtilities`/`FBLPromises`/`nanopb`/`FirebaseMessaging` 各 xcframework+`UserNotifications.framework`，工程根目录缺 `GoogleService-Info.plist` 时告警；uniPush 未勾离线推送时会提醒 base.yml 仍带 UniPush 依赖
-- iOS 的 FCM 与 Android 不同：Android 勾「离线推送 → Google FCM推送SDK」写的是 `push.unipush.fcm`（厂商通道，要与普通 uniPush 二选一），iOS 的 FCM 是 `sdkConfigs.push.fcm` 这个独立平台，三种推送（uniPush / 个推 / FCM）按官方文档各自独立，可并列；`push.unipush.fcm` 这种嵌套键在 iOS 侧不参与依赖计算
-- 依赖清单来自 DCloud 官方 [iOS 模块配置文档](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html)；高德地图按官方「仅 nvue 页面支持」使用 `DCUniMap` 套件
-- 动态 framework（如 `GoogleSignIn`、`Stripe*`）自动 `embed` + `codeSign`，静态库不 embed
-- SDK 里找不到的库 / 资源会告警并跳过；`base.yml` / `custom.yml` 已有的依赖不重复写入
+- 基础模块按名字映射到 subspec，少数同名不同义的：`Camera`→`CameraGallery`、`VideoPlayer`→`Video`、`Record`→`Audio`、`Bluetooth`→`BlueTooth`、`SQLite`→`Sqlite`、`Contact`→`Contacts`
+- 三方模块按 `sdkConfigs` 的 provider 选 subspec：`geolocation`（system/amap/baidu/tencent）、`maps`（amap/baidu/google）、`oauth`（weixin/qq/sina/apple/google/facebook/univerify）、`payment`（weixin/alipay/appleiap/paypal/stripe）、`push`（unipush/getui/fcm）、`share`（weixin/qq/sina）、`speech`（baidu/ifly）、`statics`（umeng/google）；`push.unipush` 只有 `offline: true`（勾了离线推送）才集成 `Push-UniPush`（GTSDK），仅在线推送时走 jssdk，只保留 `Push` 基础库——与 entitlements 的 `aps-environment` 共用这个开关
+- 同时启用微信支付时，登录/分享的微信 subspec 自动切换成 `Oauth-Wechat-PaySDK` / `Share-Wechat-PaySDK`（`libWeChatSDK.a` 与 `libWeChatSDK_pay.a` 符号重复，不能共存）
+- Pod 模式开启时 `config/*.yml` 里的 `FRAMEWORK_SEARCH_PATHS` / `LIBRARY_SEARCH_PATHS` / `HEADER_SEARCH_PATHS` 会**整键删除**（保留半截会覆盖 Pods 的 xcconfig、丢 pod 头文件路径），路径统一由 Pods 提供；其余非 SDK 条目（含模板默认的系统变量）也会被带走，删除时会黄字列出，如仍需要请移到 Podfile 的 `post_install` 或 Pods xcconfig
+- 没有对应 subspec 的模块或服务商只告警，不猜依赖；`push.fcm`、`statics.google` 需要工程自带 `GoogleService-Info.plist`，uapp 只提醒不生成
+- 依赖版本由离线 SDK 根目录的 `uniapp.podspec` 决定，升级 SDK 时 podspec、`license.md` 与 `SDK/` 一起换（`uapp config set ios.sdk` 指向完整 SDK，prepare 会补齐 podspec 与 license.md）
+
 - **隐私描述必填**：模块启用后必须在 `app-plus.distribute.ios.privacyDescription` 里配置对应键，缺失时打包直接失败并列出缺的键：
 
   | 模块 | 需要的键 |
@@ -502,7 +505,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - `statics.google`（Firebase Analytics）需要工程里自带 `GoogleService-Info.plist`，uapp 只提醒不生成
 - **业务参数**：各平台在 `sdkConfigs` 里必须填的 iOS 参数会检查，缺了只告警（库能链接但运行时会失败）：
   `oauth.weixin` / `oauth.qq` / `oauth.facebook` / `payment.weixin` / `share.weixin` / `share.qq` 需要 `appid`；`oauth.sina` / `share.sina` 需要 `appkey`、`redirect_uri`；`oauth.google` 需要 `clientid`；`payment.paypal` / `payment.stripe` 需要 `returnURL_ios`；`speech.baidu` 需要 `appid`、`apikey`、`secretkey`；`geolocation.*` / `maps.*` / `statics.umeng` 需要 `appkey_ios`；`maps.google` 需要 `APIKey_ios`；`statics.google` 需要 `config_ios`
-- **宏定义 / LinkerFlags**：`config/base.yml` 缺 `OTHER_LDFLAGS: -ObjC` 或缺 `GCC_PREPROCESSOR_DEFINITIONS` 时告警；官方没有「模块 → 宏」对照表，具体值按 [common.html](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html) 手动补
+- **宏定义 / LinkerFlags**：`config/base.yml` 里的 `OTHER_LDFLAGS` 保留 `$(inherited) -ObjC`（分类方法需要 `-ObjC`，`$(inherited)` 让 Pods 的 xcconfig 生效）；官方没有「模块 → 宏」对照表，具体值按 [common.html](https://nativesupport.dcloud.net.cn/AppDocs/usemodule/iOSModuleConfig/common.html) 手动补
 
 ### 📦 iOS 模块注册（feature.plist）
 
@@ -731,6 +734,9 @@ uapp config delete hbx.dir
 |:------|:--------|
 | `hbx.dir`、`wx.dir` | 已存在的安装目录 |
 | `node` | 已存在的程序文件 |
+| `ios.sdk` | 完整 iOS 离线 SDK 根目录（含 `uniapp.podspec` 与 `SDK/`） |
+
+iOS 构建默认从 `~/.uappsdk/ios` 取完整离线 SDK；那里只有 `SDK/` 时执行 `uapp config set ios.sdk <完整 SDK 目录>`，prepare 会把 `uniapp.podspec` 与 `license.md` 补齐到 `~/.uappsdk/ios`，之后就不再依赖这项配置。两处都没有完整 SDK 时 iOS 构建会直接报错退出。
 
 路径支持相对路径和 `~/`，保存时转为绝对路径，含空格的路径需加引号。未知配置项、缺少或多余参数、非法值会报错，且不会修改配置文件。
 
