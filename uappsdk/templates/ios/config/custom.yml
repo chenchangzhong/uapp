@@ -3,6 +3,13 @@
 # projectReferences:
 #   IJKMediaPlayer:
 #     path: SDKs/ijkplayer/ios/IJKMediaPlayer/IJKMediaPlayer.xcodeproj
+#
+# 示例: 启用 RTL 右缘返回 (Main/AppDelegate.m 的 RTL_EDGE_BACK, 机制与注意点见 README「右缘返回」一节)
+# 注意: GCC_PREPROCESSOR_DEFINITIONS 会整体覆盖 base.yml 的同名值, 必须带上其现有宏;
+#       使用时把文件底部的 uAppBase: {} 替换成:
+#     uAppBase:
+#         settings:
+#             GCC_PREPROCESSOR_DEFINITIONS: '$(inherited) PDR_PLUS_MAP PDR_PLUS_GETUI PDR_PLUS_UMEN RTL_EDGE_BACK=1'
 
 targetTemplates:
     uAppBase: {}

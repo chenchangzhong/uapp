@@ -49,6 +49,44 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
 > 打 release 建议 `DEVELOPER_DIR=/Applications/Xcode-26.x.app/Contents/Developer`
 > （正式版 Xcode），beta 版 Xcode 编出的包 App Store 拒收。
 
+## 右缘返回（RTL，可选，默认关）
+
+面向中东等从右向左阅读习惯的 App：返回手势应挂在屏幕右缘。DCloud 原生侧滑返回是自建手势
+`H5CoreScreenEdgePan`，edges 创建时锁死 Left，官方 `popGesture` / pages.json 均无方向配置；
+模板在 `Main/AppDelegate.m` 内置了一套自研右缘返回实现，默认关闭，要点：
+
+- 拦截 `UIView -addGestureRecognizer:`（method swizzle）：DCloud 左缘识别器加入即被摘除。
+  必须在 PDRCore init 前安装，`didFinishLaunchingWithOptions` 里已就位
+- 自建右缘 `UIScreenEdgePanGestureRecognizer` 挂在 `windowManager.superview`；
+  命中条件：可见 frame ≥ 2、非 tab 根页、`popGesture` 不为 none/skip
+- 交互：当前页跟手左移 + 下层页 1/3 视差 + 压暗与右缘投影；位移超 30% 屏宽或松手速度够快
+  → 滑出后 `uni.navigateBack()`，否则回弹
+- 子开关在 AppDelegate.m 顶部就地改：`RTL_EDGE_BACK_FOLLOW`（跟手位移，关则只做阈值判定）、
+  `RTL_DUMP_SELECTORS`（SDK 升级排查用，dump PDRCore 相关类的方法名）
+
+启用方式二选一：
+
+1. `config/custom.yml` 把 `uAppBase: {}` 替换成（`GCC_PREPROCESSOR_DEFINITIONS` 会整体覆盖
+   base.yml 的同名值，必须带上其现有宏；该文件注释里有现成示例）：
+
+   ```yaml
+   targetTemplates:
+       uAppBase:
+           settings:
+               GCC_PREPROCESSOR_DEFINITIONS: '$(inherited) PDR_PLUS_MAP PDR_PLUS_GETUI PDR_PLUS_UMEN RTL_EDGE_BACK=1'
+   ```
+
+2. 直接把 `Main/AppDelegate.m` 里 `#ifndef RTL_EDGE_BACK` 块的默认值改成 1。
+
+已知限制（DCloud SDK 升级后需真机回归）：
+
+- `popGesture` / `isScreenEdgePanSkip` 是未公开 selector，升级后先验证 popGesture:none 页
+  （禁返回页）与新页面类型是否仍被正确拦截——selector 失效时的退化方向是「放行」
+- `addGestureRecognizer:` 的交换全 App 生效，将来要加左缘侧滑抽屉等手势需在拦截器里加白名单
+- 返回动画是「先隐藏当前页再 `uni.navigateBack()`」，避免与 webview 自身转场叠成双动画
+- 真机验证清单：普通页返回、tab 根页（不可滑）、popGesture:none 页（不可滑）、新开页后返回、
+  动画过程中连续滑、快速连续返回
+
 ## 已知约定
 
 - 包名（`PRODUCT_BUNDLE_IDENTIFIER`）由 prepare 按构建类型从
