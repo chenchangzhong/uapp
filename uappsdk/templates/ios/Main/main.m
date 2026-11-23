@@ -12,6 +12,8 @@
 
 int main(int argc, char * argv[])
 {
+    _uniArgc = argc;
+    _uniArgv = argv;
     @autoreleasepool {
         return UIApplicationMain(argc, argv, nil, NSStringFromClass([AppDelegate class]));
     }

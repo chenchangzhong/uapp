@@ -86,6 +86,8 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
 - 返回动画是「先隐藏当前页再 `uni.navigateBack()`」，避免与 webview 自身转场叠成双动画
 - 真机验证清单：普通页返回、tab 根页（不可滑）、popGesture:none 页（不可滑）、新开页后返回、
   动画过程中连续滑、快速连续返回
+- 模板对齐官方 scene 架构后需重新真机过一遍上述清单：RTL 安装读 `self.window`
+  （由 `configureWindow:` 设置，时序已核），scene 模式的实际手势行为以真机为准
 
 ## 已知约定
 
@@ -104,6 +106,10 @@ uapp run build:app-plus release   # release 发布包 (export_release.plist)
 - 旧的 `uapp["ios.package"]` / `uapp["ios.appkey"]` 已废弃，不再读取
 - iOS 权限文案由 `app-plus.distribute.ios.privacyDescription` 同步：键名即 Info.plist
   键名（如 `NSCameraUsageDescription`），打包时写入本次构建类型的 Info.plist
+- 工程生命周期为 scene 架构（对齐官方 2026-10 版 demo）：`AppDelegate` 只做 PDRCore
+  init 与 `configureWindow:`，前后台 / openURL / 快捷方式 / userActivity 事件全部由
+  `Main/SceneDelegate.m` 转发给 PDRCore；`main.m` 的 `_uniArgc/_uniArgv` 赋值是官方
+  标准写法（定义在 DCUniBase.framework），勿删
   （base/test/sim → `AppDev/Info.plist`，release → `AppRelease/Info.plist`），
   已有键覆盖、模板里没有的键自动插入；值不做国际化展开
 - URL Scheme / 白名单 / Google 登录也按标准字段同步：`ios.urltypes` →

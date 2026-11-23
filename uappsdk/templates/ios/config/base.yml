@@ -38,6 +38,7 @@ targetTemplates:
                   - main.m
                   - AppDelegate.m
                   - ViewController.m
+                  - SceneDelegate.m
               buildPhase: sources
 
             - path: Main/Dcloud.swift

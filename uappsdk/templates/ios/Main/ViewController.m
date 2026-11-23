@@ -10,8 +10,6 @@
 #import "PDRToolSystemEx.h"
 #import "AppDelegate.h"
 
-#define kStatusBarHeight 20.f
-
 @implementation ViewController
 
 - (void)loadView
@@ -19,14 +17,10 @@
     PDRCore *h5Engine = [PDRCore Instance];
     [super loadView];
     [self setStatusBarStyle:h5Engine.settings.statusBarStyle];
-    _isFullScreen = [UIApplication sharedApplication].statusBarHidden;
+    _isFullScreen = self.view.window.windowScene.statusBarManager.statusBarHidden;
     if ( _isFullScreen != h5Engine.settings.fullScreen ) {
         _isFullScreen = h5Engine.settings.fullScreen;
-        if ( [self  respondsToSelector:@selector(setNeedsStatusBarAppearanceUpdate)] ) {
-             [self setNeedsStatusBarAppearanceUpdate];
-        } else {
-            [[UIApplication sharedApplication] setStatusBarHidden:_isFullScreen];
-        }
+        [self setNeedsStatusBarAppearanceUpdate];
     }
     self.view.backgroundColor = [UIColor whiteColor];
     [h5Engine setContainerView:self.view];
@@ -46,9 +40,7 @@
 {
     [[PDRCore Instance] handleSysEvent:PDRCoreSysEventInterfaceOrientation
                             withObject:[NSNumber numberWithInt:toInterfaceOrientation]];
-    if ([PTDeviceOSInfo systemVersion] >= PTSystemVersion8Series) {
-        [[UIApplication sharedApplication] setStatusBarHidden:_isFullScreen ];
-    }
+    [self setNeedsStatusBarAppearanceUpdate];
 }
 
 - (BOOL)shouldAutorotate
@@ -86,10 +78,7 @@
 }
 
 -(BOOL)getStatusBarHidden {
-    if ( [PTDeviceOSInfo systemVersion] > PTSystemVersion6Series ) {
-        return _isFullScreen;
-    }
-    return [UIApplication sharedApplication].statusBarHidden;
+    return _isFullScreen;
 }
 
 #pragma mark - StatusBarStyle
@@ -99,11 +88,7 @@
 -(void)setStatusBarStyle:(UIStatusBarStyle)statusBarStyle {
     if ( _statusBarStyle != statusBarStyle ) {
         _statusBarStyle = statusBarStyle;
-        if ( [self  respondsToSelector:@selector(setNeedsStatusBarAppearanceUpdate)] ) {
-            [self setNeedsStatusBarAppearanceUpdate];
-        } else {
-            [[UIApplication sharedApplication] setStatusBarStyle:_statusBarStyle];
-        }
+        [self setNeedsStatusBarAppearanceUpdate];
     }
 }
 
@@ -120,36 +105,7 @@
     }
 
     _isFullScreen = fullScreen;
-    [[UIApplication sharedApplication] setStatusBarHidden:_isFullScreen withAnimation:_isFullScreen?NO:YES];
-    if ( [PTDeviceOSInfo systemVersion] > PTSystemVersion6Series ) {
-        [self setNeedsStatusBarAppearanceUpdate];
-    }// else {
- //   return;
-    //  }
-    CGRect newRect = self.view.bounds;
-    if ( [PTDeviceOSInfo systemVersion] <= PTSystemVersion6Series ) {
-        newRect = [UIApplication sharedApplication].keyWindow.bounds;
-        if ( _isFullScreen ) {
-            [UIView beginAnimations:nil context:nil];
-            self.view.frame = newRect;
-            [UIView commitAnimations];
-        } else {
-            UIInterfaceOrientation interfaceOrientation = [UIApplication sharedApplication].statusBarOrientation;
-            if ( UIDeviceOrientationLandscapeLeft == interfaceOrientation
-                || interfaceOrientation == UIDeviceOrientationLandscapeRight ) {
-                newRect.size.width -=kStatusBarHeight;
-            } else {
-                newRect.origin.y += kStatusBarHeight;
-                newRect.size.height -=kStatusBarHeight;
-            }
-            [UIView beginAnimations:nil context:nil];
-            self.view.frame = newRect;
-            [UIView commitAnimations];
-        }
-        [[PDRCore Instance] handleSysEvent:PDRCoreSysEventInterfaceOrientation
-                                withObject:[NSNumber numberWithInt:0]];
-
-    }
+    [self setNeedsStatusBarAppearanceUpdate];
 }
 
 - (void)didReceiveMemoryWarning{

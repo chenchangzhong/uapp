@@ -7,8 +7,10 @@
 //
 
 #import <UIKit/UIKit.h>
-
+extern int _uniArgc;
+extern char** _uniArgv;
 @interface AppDelegate : UIResponder <UIApplicationDelegate>
 @property (strong, nonatomic) UIWindow *window;
 @property (strong, nonatomic) UINavigationController *rootViewController;
+- (void)configureWindow:(UIWindow *)window;
 @end
