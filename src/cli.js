@@ -1461,6 +1461,8 @@ function updateIOSMetaData() {
   // 两个 Info.plist (AppDev / AppRelease) 都按 manifest 同步: 条目标题以 manifest 为准,
   // 只更新当前构建类型会留下另一个 plist 的旧值 (release 包悄悄用旧文案)
   syncInfoPlistContent()
+  // Xcode 工程属性 DEVELOPMENT_LANGUAGE 同样以 manifest 为准 (不影响构建产物)
+  updateIOSDevelopmentLanguage()
   // 能力声明按 manifest 的模块开关生成: 没勾 Push 就不该带 aps-environment,
   // 没配苹果登录就不该带 applesignin, 否则签名时和 App ID 对不上
   const entitlementFiles = syncIOSEntitlements()
@@ -1477,6 +1479,52 @@ function updateIOSMetaData() {
   }
 
   console.log(config ? `✅ updateIOSMetaData (${rawBuildType}: ${config.package})` : '✅ updateIOSMetaData (未指定构建类型: 包名/appkey 未写, 版本/Info.plist/entitlements 已同步)')
+}
+
+// manifest.fallbackLocale -> Xcode 工程语言属性, 两层都同步 (都不影响构建产物):
+// 1. config/base.yml 的 DEVELOPMENT_LANGUAGE (target build setting, 只供 Info.plist 的 $(DEVELOPMENT_LANGUAGE) 展开)
+// 2. project.yml 的 options.developmentLanguage (pbxproj 的 developmentRegion, 即 Xcode 的 Default Localization 显示,
+//    避免打开 Xcode 后误会语言没改; 无 options 段时自动补)
+// 行不存在或值相同则不动; manifest 未配置 fallbackLocale 时保留各自静态值作兜底
+function updateIOSDevelopmentLanguage() {
+  const language = String($G.manifest.fallbackLocale || '').trim()
+  if (!language) return
+  let changed = false
+
+  const baseFile = path.join($G.appDir, 'config/base.yml')
+  if (fs.existsSync(baseFile)) {
+    const content = fs.readFileSync(baseFile, 'utf8')
+    const re = /^([ \t]*DEVELOPMENT_LANGUAGE:[ \t]*).+$/m
+    if (re.test(content)) {
+      const updated = content.replace(re, (match, head) => head + language)
+      if (updated !== content) {
+        fs.writeFileSync(baseFile, updated)
+        changed = true
+      }
+    }
+  }
+
+  const projectFile = path.join($G.appDir, 'project.yml')
+  if (fs.existsSync(projectFile)) {
+    const content = fs.readFileSync(projectFile, 'utf8')
+    const lineRe = /^([ \t]*developmentLanguage:[ \t]*).+$/m
+    let updated = content
+    if (lineRe.test(content)) {
+      updated = content.replace(lineRe, (match, head) => head + language)
+    } else if (/^options:[ \t]*$/m.test(content)) {
+      // 已有 options 段但没写 developmentLanguage: 在 options: 下插一行
+      updated = content.replace(/^options:[ \t]*$/m, (match) => `${match}\n  developmentLanguage: ${language}`)
+    } else if (!/^options:/m.test(content) && /^name:/m.test(content)) {
+      // 没有 options 段: 在 name: 后补整段 (options 内联写法不碰, 避免插出双键)
+      updated = content.replace(/^(name:[ \t]*.+)$/m, `$1\n\noptions:\n  developmentLanguage: ${language}`)
+    }
+    if (updated !== content) {
+      fs.writeFileSync(projectFile, updated)
+      changed = true
+    }
+  }
+
+  if (changed) console.log(`✅ updateIOSDevelopmentLanguage (${language})`)
 }
 
 // entitlements 里的能力项按 manifest 模块开关生成, 只动这两个键, 其它能力保持用户手写内容

@@ -451,6 +451,7 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 - 语言列表 = 根节点 `locale` + `fallbackLocale`（只认 manifest，不扫描 `locale/` 目录：目录里残留的语种文件不会进 App Store 语言列表）
 - **不写这个键，iOS 只认 `CFBundleDevelopmentRegion`**，`uni.getSystemInfoSync().language` 永远是开发语言，应用内多语言不会跟随系统切换
 - `CFBundleDevelopmentRegion`（系统语言不在支持列表时的兜底）跟随 `fallbackLocale`，保证它始终是 `CFBundleLocalizations` 里的一种；没配 `fallbackLocale` 就不动
+- `config/base.yml` 的 `DEVELOPMENT_LANGUAGE`（target build setting）与 `project.yml` 的 `options.developmentLanguage`（Xcode 的 Default Localization）都跟随 `fallbackLocale`，避免打开 Xcode 后误会语言没改；没配 `fallbackLocale` 时保留各自静态值
 - 没配置的字段保持模板原值（模板里的 `fashionkujihk`、`line` 不会被清空）
 - 模板里没有 `CFBundleURLTypes` / `LSApplicationQueriesSchemes` / `GIDClientID` 时会自动补齐
 
