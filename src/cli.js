@@ -23,7 +23,7 @@ import { updateAndroidModuleLibs, updateAndroidNativePluginLibs, updateAndroidUn
 import { updateAndroidUtsModules, buildIOSUtsYml } from './utsModules.js'
 import { isNativePluginPath, removeEmptyModuleDirectories } from './app-resources.js'
 import { printIOSSigningInfo } from './ios-signing.js'
-import { isPodSDKRoot, resolvePodSDKRoot, ensurePodSDKFiles, ensureSignedGoogleFrameworks, podSubspecs, writePodfile, runPodInstall, readIOSTargets } from './ios-pods.js'
+import { isPodSDKRoot, resolvePodSDKRoot, ensurePodSDKFiles, ensureSignedGoogleFrameworks, podSubspecs, writePodfile, runPodInstall, readIOSTargets, CORE_MOTION_SUBSPECS } from './ios-pods.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
 const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
@@ -1670,6 +1670,51 @@ function syncIOSCapabilities() {
   return true
 }
 
+// CoreMotion.framework 只在选中的 subspec 真的引用 CM* 符号时才让工程链接:
+// 官方 podspec 的 Accelerometer (只声明 Accelerate)、Payment-Paypal、Geolocation-Tencent 都漏了这条依赖,
+// 而工程开了 -ObjC, 静态库里的 CMMotionManager 未定义符号必须解析 -> 按当前 subspecs 动态增删 base.yml 条目。
+const CORE_MOTION_ENTRY = '            - sdk: CoreMotion.framework'
+
+function syncIOSSystemFrameworks(subspecs) {
+  const file = path.join($G.appDir, 'config/base.yml')
+  if (!fs.existsSync(file)) return false
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  const want = (subspecs || []).some((name) => CORE_MOTION_SUBSPECS.includes(name))
+  const entryAt = lines.findIndex((line) => line.trim() === '- sdk: CoreMotion.framework')
+  if (want === (entryAt !== -1)) return false
+
+  // dependencies 块的范围: 从 `dependencies:` 到下一个缩进 <= 8 的非空行 (settings/sources 等)
+  const blockEnd = (start) => {
+    let end = start + 1
+    while (end < lines.length && (lines[end].trim() === '' || /^\s*/.exec(lines[end])[0].length > 8)) end += 1
+    return end
+  }
+
+  if (want) {
+    const depAt = lines.findIndex((line) => /^ {8}dependencies:\s*$/.test(line))
+    if (depAt === -1) {
+      const at = lines.findIndex((line) => /^ {8}settings:\s*$/.test(line))
+      if (at === -1) return false
+      lines.splice(at, 0, '        dependencies:', CORE_MOTION_ENTRY, '')
+    } else {
+      const end = blockEnd(depAt)
+      let last = depAt
+      for (let i = depAt + 1; i < end; i += 1) if (lines[i].trim()) last = i
+      lines.splice(last + 1, 0, CORE_MOTION_ENTRY)
+    }
+  } else {
+    lines.splice(entryAt, 1)
+    // 只剩空键时整块删掉: 空 dependencies 会让 xcodegen 报错
+    const depAt = lines.findIndex((line) => /^ {8}dependencies:\s*$/.test(line))
+    if (depAt !== -1) {
+      const end = blockEnd(depAt)
+      if (!lines.slice(depAt + 1, end).some((line) => line.trim())) lines.splice(depAt, end - depAt)
+    }
+  }
+  fs.writeFileSync(file, lines.join('\n'))
+  return true
+}
+
 function updateIOSVersions() {
   const versionName = normalizeVersionName($G.manifest.uapp.versionName)
   const file = path.join($G.appDir, 'config', 'base.yml')
@@ -1987,6 +2032,7 @@ function setupIOSPodMode() {
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs
   })
   writePodfile({ appDir: $G.appDir, subspecs, targets: readIOSTargets($G.appDir) })
+  if (syncIOSSystemFrameworks(subspecs)) console.log('✅ iOS 系统框架依赖已按模块更新 (CoreMotion.framework)')
   console.log(`✅ iOS Pod 模式 (依赖来自 uniapp.podspec: ${subspecs.join(', ')})`)
   subspecWarnings.forEach((warning) => console.log(chalk.yellow(warning)))
 }

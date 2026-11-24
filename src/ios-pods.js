@@ -12,6 +12,34 @@ import { execFileSync } from 'node:child_process'
 import { execSync } from 'child_process'
 
 const PODSPEC_NAME = 'uniapp.podspec'
+// 恒带的 subspec: 这些模块在 manifest 里没有勾选入口 (uni-app「App功能模块」表只列了 24 个可勾选模块),
+// 云打包和 Android 的 lib.5plus.base-release.aar 都无条件包含 (见 src/androidModules.js 顶部),
+// iOS 把同一批能力拆成独立静态库, 只按 modules 生成就会漏, 运行期一调用即弹「打包时未添加 XX 模块」
+const BASE_SUBSPECS = [
+  'Core',
+  'File', // plus.io, 启动即用
+  'XMLHttpRequest', // plus.net, uni.request 的底层实现
+  'Zip', // plus.zip / uni.compressImage
+  'Log', // plus.console
+  'Audio' // plus.audio, uni.createInnerAudioContext 等
+]
+// 云打包默认带、但业务很少直接调用的模块: 不进 BASE_SUBSPECS, 由 writePodfile 以注释形式写进生成的
+// Podfile, 用户在工程里取消注释即可启用。Accelerometer 需要的 CoreMotion.framework 由
+// src/cli.js 的 syncIOSSystemFrameworks 按所选 subspec 动态补进 config/base.yml
+const OPTIONAL_SUBSPECS = {
+  Accelerometer: '摇一摇 / 计步',
+  Proximity: '距离感应 (贴近听筒熄屏)'
+}
+// 这些 subspec 的实现里引用了 CoreMotion 的类, 但官方 podspec 没声明该框架 (Accelerometer 只写了 Accelerate),
+// 工程开了 -ObjC 就必须由 target 补链接。Orientation 的 podspec 已声明, 一并归入, 重复链接无副作用。
+// 只有当前 subspecs 命中这里时才在 config/base.yml 写 CoreMotion.framework, 不再无条件链接。
+export const CORE_MOTION_SUBSPECS = [
+  'Accelerometer',
+  'Orientation',
+  'Payment-AliPay',
+  'Payment-Paypal',
+  'Geolocation-Tencent'
+]
 // manifest 的 app-plus.modules 标识 -> podspec 里的基础 subspec
 const MODULE_SUBSPECS = {
   Accelerometer: 'Accelerometer',
@@ -103,7 +131,7 @@ export function resolvePodSDKRoot(sdkHomeDir) {
 // manifest 的 modules/sdkConfigs -> podspec subspec 列表; 无法映射的模块只警告
 export function podSubspecs({ modules, sdkConfigs }) {
   const warnings = []
-  const subspecs = new Set(['Core'])
+  const subspecs = new Set(BASE_SUBSPECS)
   const add = (name) => {
     if (name) subspecs.add(name)
   }
@@ -183,7 +211,22 @@ export function writePodfile({ appDir, subspecs, targets }) {
   // 用 CDN 源避免克隆整个 Specs 仓库, 广告类 subspec 另加 volcengine 源
   const sources = ["source 'https://cdn.cocoapods.org/'"]
   if (subspecs.some((name) => name.startsWith('UniAd-'))) sources.push("source 'https://github.com/volcengine/volcengine-specs.git'")
-  const content = `# 由 uapp prepare 生成, 不要手改: 内容会随 manifest 的模块配置重建。
+  // 选装模块 (Accelerometer/Proximity) 没在 manifest 里勾选时不写进 subspecs, 而是以注释形式写进
+  // 生成的 Podfile: 用户在工程里取消注释 -> pod install 即可启用, 不必回头改 uapp 源码
+  const optionalNames = Object.keys(OPTIONAL_SUBSPECS).filter((name) => !subspecs.includes(name))
+  const subspecLines = subspecs.map((name) => `  '${name}',`)
+  if (optionalNames.length) {
+    subspecLines.push(
+      '  # 以下模块云打包默认带, 但业务很少直接调用, 默认不装:',
+      '  # 取消对应行的注释后执行 pod install 即可启用; 重跑 uapp 会重建本文件,',
+      '  # 要长期启用请改 manifest 的 app-plus.modules (它优先于这里的注释)'
+    )
+    optionalNames.forEach((name) => {
+      subspecLines.push(`  # ${OPTIONAL_SUBSPECS[name]}`)
+      subspecLines.push(`  # '${name}',`)
+    })
+  }
+  const content = `# 由 uapp prepare 生成: 内容随 manifest 的模块配置重建, 手改会在下次构建时被覆盖。
 platform :ios, '15.0'
 ${sources.join('\n')}
 
@@ -192,7 +235,9 @@ use_frameworks! :linkage => :static
 
 # SDKs/SDK 是 prepare 建的软链, realpath 解析到真实 SDK/SDK 后, 上一级就是含 uniapp.podspec 的根目录
 sdk_path = File.expand_path('..', File.realpath(File.join(__dir__, 'SDKs', 'SDK')))
-uniapp_subspecs = [${subspecs.map((name) => `'${name}'`).join(', ')}]
+uniapp_subspecs = [
+${subspecLines.join('\n')}
+]
 # UTS 插件仍由 prepare 写进 config/custom.yml (用户代码, 与 podspec 的 SDK 库不冲突)
 
 ${targetList.map((target) => `target '${target}' do
