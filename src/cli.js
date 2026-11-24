@@ -1715,6 +1715,35 @@ function syncIOSSystemFrameworks(subspecs) {
   return true
 }
 
+// PandoraApi.bundle 由 uniapp.podspec 从共享 SDK 原样拷进包, 直接改共享 SDK 会把补丁
+// 串给同机其他工程; 所以补丁结果落在工程 config/feature.plist, 由这个 phase 在构建时覆盖进包。
+// 顺序关键: 必须晚于 [CP] Copy Pods Resources, 否则会被 Pod 拷回原版, 顺序由 Podfile 的 post_install 调整。
+const FEATURE_PLIST_PHASE = [
+  '            - name: uapp-feature-plist',
+  '              script: |',
+  '                SRC="${SRCROOT}/config/feature.plist"',
+  '                DST="${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}/PandoraApi.bundle/feature.plist"',
+  '                if [ -f "$SRC" ] && [ -d "$(dirname "$DST")" ]; then',
+  '                    cp -f "$SRC" "$DST"',
+  '                fi',
+]
+
+function syncIOSFeaturePlistPhase() {
+  const file = path.join($G.appDir, 'config/base.yml')
+  if (!fs.existsSync(file)) return false
+  const lines = fs.readFileSync(file, 'utf8').split('\n')
+  if (lines.some((line) => /^\s*-\s*name:\s*uapp-feature-plist\s*$/.test(line))) return false
+  const at = lines.findIndex((line) => /^ {8}postBuildScripts:\s*$/.test(line))
+  if (at === -1) return false
+  let end = at + 1
+  while (end < lines.length && (lines[end].trim() === '' || /^\s*/.exec(lines[end])[0].length > 8)) end += 1
+  let last = at
+  for (let i = at + 1; i < end; i += 1) if (lines[i].trim()) last = i
+  lines.splice(last + 1, 0, ...FEATURE_PLIST_PHASE)
+  fs.writeFileSync(file, lines.join('\n'))
+  return true
+}
+
 function updateIOSVersions() {
   const versionName = normalizeVersionName($G.manifest.uapp.versionName)
   const file = path.join($G.appDir, 'config', 'base.yml')
@@ -2033,6 +2062,7 @@ function setupIOSPodMode() {
   })
   writePodfile({ appDir: $G.appDir, subspecs, targets: readIOSTargets($G.appDir) })
   if (syncIOSSystemFrameworks(subspecs)) console.log('✅ iOS 系统框架依赖已按模块更新 (CoreMotion.framework)')
+  if (syncIOSFeaturePlistPhase()) console.log('✅ iOS feature.plist 覆盖脚本已加入 config/base.yml')
   console.log(`✅ iOS Pod 模式 (依赖来自 uniapp.podspec: ${subspecs.join(', ')})`)
   subspecWarnings.forEach((warning) => console.log(chalk.yellow(warning)))
 }
@@ -3201,6 +3231,9 @@ function prepareIOSNativePlugins(plugins) {
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
     privacyDescription: $G.manifest['app-plus']?.distribute?.ios?.privacyDescription,
     appDir: $G.appDir,
+    // 依赖只有 uniapp.podspec 一条通道: setupIOSPodMode 找不到完整 SDK 会直接退出,
+    // 因此这里不会再有手写依赖, 没有 MODULE_DEPS 的模块 (如 FacialRecognitionVerify) 不算缺口
+    podMode: true,
   })
   moduleYml.groups = []
   if (moduleYml.errors.length) {
@@ -3217,7 +3250,9 @@ function prepareIOSNativePlugins(plugins) {
   const pluginYml = buildIOSNativePluginYml(plugins)
   updateIOSCustomYml(mergeIOSYml(moduleYml, pluginYml, utsYml))
   const featurePatch = patchFeaturePlist({
-    plistPath: path.join($G.appDir, 'SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist'),
+    // 源文件只读共享 SDK 里的 pristine 版本; 结果写到工程内, 构建时再覆盖进包
+    sourcePlist: path.join($G.appDir, 'SDKs/SDK/Bundles/PandoraApi.bundle/feature.plist'),
+    outputPlist: path.join($G.appDir, 'config/feature.plist'),
     modules: $G.manifest['app-plus']?.modules,
     sdkConfigs: $G.manifest['app-plus']?.distribute?.sdkConfigs,
   })

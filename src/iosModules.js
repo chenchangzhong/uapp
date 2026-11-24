@@ -25,6 +25,9 @@ const MODULE_PERMISSIONS = {
   Camera: ['NSCameraUsageDescription', 'NSPhotoLibraryUsageDescription', 'NSPhotoLibraryAddUsageDescription', 'NSMicrophoneUsageDescription'],
   Contact: ['NSContactsUsageDescription'],
   FaceID: ['NSFaceIDUsageDescription'],
+  // 实人认证走阿里云活体检测, 会调相机做人脸采集;
+  // 依据 https://help.aliyun.com/zh/id-verification/financial-grade-id-verification/security-and-compliance/compliance-description
+  FacialRecognitionVerify: ['NSCameraUsageDescription'],
   iBeacon: ['NSBluetoothPeripheralUsageDescription', 'NSBluetoothAlwaysUsageDescription'],
   LivePusher: ['NSCameraUsageDescription', 'NSMicrophoneUsageDescription'],
   Record: ['NSMicrophoneUsageDescription'],
@@ -491,19 +494,20 @@ function checkBaseYmlFlags(baseYmlPath) {
 // 官方 oauth.html 要求把用到的登录平台登记到 feature.plist 的 OAuth->extend 下，
 // 否则运行时找不到对应平台实现。类名以官方截图为准，这里只检查是否登记。
 // 按 manifest 把缺失的模块节点补进 feature.plist（幂等，已有节点不覆盖）
-export function patchFeaturePlist({ plistPath, modules, sdkConfigs }) {
+export function patchFeaturePlist({ sourcePlist, outputPlist, modules, sdkConfigs }) {
   const warnings = []
   const added = []
   if (process.platform !== 'darwin') {
     return { warnings: ['feature.plist 模块注册需要 macOS 的 plutil，已跳过'], added }
   }
-  if (!fs.existsSync(plistPath)) {
-    return { warnings: [`未找到 ${plistPath}，跳过 feature.plist 模块注册`], added }
+  if (!fs.existsSync(sourcePlist)) {
+    return { warnings: [`未找到 ${sourcePlist}，跳过 feature.plist 模块注册`], added }
   }
 
   const tmpJson = path.join(os.tmpdir(), `uapp-feature-${process.pid}.json`)
+  const tmpXml = path.join(os.tmpdir(), `uapp-feature-${process.pid}.plist`)
   try {
-    execFileSync('plutil', ['-convert', 'json', '-o', tmpJson, plistPath])
+    execFileSync('plutil', ['-convert', 'json', '-o', tmpJson, sourcePlist])
     const data = JSON.parse(fs.readFileSync(tmpJson, 'utf8'))
 
     const wanted = new Set()
@@ -529,15 +533,22 @@ export function patchFeaturePlist({ plistPath, modules, sdkConfigs }) {
       })
     }
 
-    if (!added.length) return { warnings, added }
+    // 补丁后的完整文件写到工程内, 由 config/base.yml 的 uapp-feature-plist phase 在构建时
+    // 覆盖进包; 不直接改写共享 SDK (多个工程共用 ~/.uappsdk/ios, 会互相污染)
     fs.writeFileSync(tmpJson, JSON.stringify(data))
-    execFileSync('plutil', ['-convert', 'xml1', '-o', plistPath, tmpJson])
+    execFileSync('plutil', ['-convert', 'xml1', '-o', tmpXml, tmpJson])
+    const next = fs.readFileSync(tmpXml, 'utf8')
+    if (!fs.existsSync(outputPlist) || fs.readFileSync(outputPlist, 'utf8') !== next) {
+      fs.mkdirSync(path.dirname(outputPlist), { recursive: true })
+      fs.writeFileSync(outputPlist, next)
+    }
     return { warnings, added }
   } catch (error) {
     warnings.push(`feature.plist 模块注册失败：${error.message}`)
     return { warnings, added: [] }
   } finally {
     fs.rmSync(tmpJson, { force: true })
+    fs.rmSync(tmpXml, { force: true })
   }
 }
 
@@ -549,7 +560,7 @@ function checkBusinessParams(configKey, provider, value, label) {
   return [`${label} 缺少 sdkConfigs.${configKey}.${provider} 参数 ${missing.join('、')}，库能链接但运行时会失败`]
 }
 
-export function buildIOSModuleYml({ modules, sdkConfigs, privacyDescription, appDir }) {
+export function buildIOSModuleYml({ modules, sdkConfigs, privacyDescription, appDir, podMode = false }) {
   const dependencies = []
   const sources = []
   // 按模块分组，写进 custom.yml 时每个模块一个 # <模块名>-start / -end 标记块
@@ -626,12 +637,14 @@ export function buildIOSModuleYml({ modules, sdkConfigs, privacyDescription, app
 
   Object.keys(modules || {}).forEach((key) => {
     if (MODULE_SDK_CONFIG[key] || IGNORED_MODULES.has(key)) return
+    // 隐私描述校验与依赖映射无关: 没有 MODULE_DEPS 的模块 (依赖由 podspec 提供) 也要拦住
+    checkPermissions(MODULE_PERMISSIONS[key], `模块 ${key}`)
     const dep = MODULE_DEPS[key]
     if (!dep) {
-      warnings.push(`模块 ${key} 没有对应的 iOS 依赖映射，请手动在 config/custom.yml 配置`)
+      // Pod 模式依赖来自 uniapp.podspec, 缺 MODULE_DEPS 是正常的, 不该提示手写 custom.yml
+      if (!podMode) warnings.push(`模块 ${key} 没有对应的 iOS 依赖映射，请手动在 config/custom.yml 配置`)
       return
     }
-    checkPermissions(MODULE_PERMISSIONS[key], `模块 ${key}`)
     add(dep, `模块 ${key}`, key)
   })
 

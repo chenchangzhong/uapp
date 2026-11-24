@@ -51,6 +51,8 @@ const MODULE_SUBSPECS = {
   Contact: 'Contacts',
   Contacts: 'Contacts',
   FaceID: 'FaceId',
+  // 实人认证: HBuilderX 3.7.4+ 的「App模块配置」里有, 但没进 app-modules 那张可勾选表
+  FacialRecognitionVerify: 'FacialRecognitionVerify',
   File: 'File',
   Fingerprint: 'Fingerprint',
   iBeacon: 'IBeacon',
@@ -207,8 +209,20 @@ export function writePodfile({ appDir, subspecs, targets }) {
   // 工程名来自 project.yml, 用户改过名字时 Podfile 也要跟着走
   const projectYml = path.join(appDir, 'project.yml')
   const name = (fs.existsSync(projectYml) && /^name:\s*(\S+)/m.exec(fs.readFileSync(projectYml, 'utf8'))?.[1]) || 'uapp'
-  // Oauth/Payment/UniAd 里有 podspec 依赖的三方 SDK (WechatOpenSDK 等), 需要 spec 源;
-  // 用 CDN 源避免克隆整个 Specs 仓库, 广告类 subspec 另加 volcengine 源
+  // deploymentTarget 以工程配置为准: config/base.yml 是 xcodegen 的源头, project.yml 是生成物。
+  // 下限由共用 SDK 的 uniapp.podspec (s.platform) 决定, 填得比它低 pod install 会直接报错
+  const deploymentTarget = (() => {
+    for (const file of ['config/base.yml', 'project.yml']) {
+      const full = path.join(appDir, file)
+      if (!fs.existsSync(full)) continue
+      const matched = /^\s*deploymentTarget:\s*['"]?([\d.]+)['"]?/m.exec(fs.readFileSync(full, 'utf8'))
+      if (matched) return matched[1]
+    }
+    return '15.0'
+  })()
+  // 只有广告类 subspec 依赖 podspec 之外的三方 SDK (Ads-CN-Beta/GDTMobSDK/KSAdSDK 等),
+  // 其中字节系在 volcengine 源里, 所以选中 UniAd-* 时额外加一个 source;
+  // Oauth/Payment/Share 全部是 vendored 静态库, 用 CDN 源即可, 避免克隆整个 Specs 仓库
   const sources = ["source 'https://cdn.cocoapods.org/'"]
   if (subspecs.some((name) => name.startsWith('UniAd-'))) sources.push("source 'https://github.com/volcengine/volcengine-specs.git'")
   // 选装模块 (Accelerometer/Proximity) 没在 manifest 里勾选时不写进 subspecs, 而是以注释形式写进
@@ -227,7 +241,7 @@ export function writePodfile({ appDir, subspecs, targets }) {
     })
   }
   const content = `# 由 uapp prepare 生成: 内容随 manifest 的模块配置重建, 手改会在下次构建时被覆盖。
-platform :ios, '15.0'
+platform :ios, '${deploymentTarget}'
 ${sources.join('\n')}
 
 project '${name}.xcodeproj'
@@ -251,6 +265,20 @@ post_install do |installer|
       config.build_settings['ARCHS[sdk=iphonesimulator*]'] = 'x86_64'
       config.build_settings['VALID_ARCHS'] = 'x86_64 arm64'
     end
+  end
+
+  # feature.plist 覆盖必须发生在 [CP] Copy Pods Resources 之后, 否则 Pod 会把 SDK 里的原版拷回包里。
+  # 这个 phase 由 prepare 写进 config/base.yml (uapp-feature-plist), 这里只把它挪到所有 phase 末尾。
+  installer.aggregate_targets.map(&:user_project).compact.uniq.each do |project|
+    moved = false
+    project.targets.each do |target|
+      phase = target.build_phases.find { |item| item.respond_to?(:name) && item.name == 'uapp-feature-plist' }
+      next unless phase
+      next if target.build_phases.last == phase
+      target.build_phases.move(phase, target.build_phases.count - 1)
+      moved = true
+    end
+    project.save if moved
   end
 end
 `
