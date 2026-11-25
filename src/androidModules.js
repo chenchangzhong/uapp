@@ -823,9 +823,10 @@ function escapeGradleString(text) {
   return String(text).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
-// 伞包：声明了伞包但工程里已有其子库时不再重复写（伞包只聚合依赖，本身没有类）
-const ARTIFACT_ALIASES = {
-  'com.facebook.android:facebook-android-sdk': ['com.facebook.android:facebook-core'],
+// 伞包归一化：伞包（facebook-android-sdk）只聚合依赖、本身没有类，插件代码只用到某个子库时
+// 直接写子库，避免把 login/share/gamingservices 等用不到的模块一起拉进 apk
+const ARTIFACT_NORMALIZE = {
+  'com.facebook.android:facebook-android-sdk': 'com.facebook.android:facebook-core',
 }
 
 function escapeRegExp(text) {
@@ -838,6 +839,8 @@ export function buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleConte
   const placeholders = []
   const warnings = []
   const seenCoords = new Set()
+  // 伞包坐标 -> 子库坐标, 需要在工程既有的依赖行上就地改写
+  const normalizations = new Map()
   // 先剔除自己之前生成的块, 否则会把自己的产物当成「工程里已有」
   const plain = String(gradleContent || '').replace(UAPP_GRADLE_BLOCK, '').replace(UAPP_PLACEHOLDER_BLOCK, '')
 
@@ -851,14 +854,18 @@ export function buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleConte
     for (const dep of Array.isArray(meta.dependencies) ? meta.dependencies : []) {
       const parts = String(dep).split(':')
       if (parts.length < 2) continue
-      const coord = `${parts[0]}:${parts[1]}`
+      const declared = `${parts[0]}:${parts[1]}`
+      const coord = ARTIFACT_NORMALIZE[declared] || declared
       // 多个插件声明同一坐标时只写第一个（gradle 里重复声明没有意义）
       if (seenCoords.has(coord)) continue
       // 工程（含 uniapp/UTS/用户手写块）里已经有同一个 group:artifact 就不再写
-      if (new RegExp(`${escapeRegExp(coord)}:`).test(plain)) continue
-      const aliases = ARTIFACT_ALIASES[coord] || []
-      if (aliases.some((alias) => new RegExp(`${escapeRegExp(alias)}:`).test(plain))) continue
-      lines.push(`implementation "${dep}"`)
+      if (new RegExp(`${escapeRegExp(declared)}:`).test(plain)) {
+        // 手写块里还是伞包时, 记下来交给 normalizePluginDependencies 就地把伞包改写成子库
+        if (coord !== declared) normalizations.set(declared, { from: declared, to: coord, id })
+        continue
+      }
+      if (coord !== declared && new RegExp(`${escapeRegExp(coord)}:`).test(plain)) continue
+      lines.push(`implementation "${coord === declared ? dep : `${coord}:${parts.slice(2).join(':')}`}"`)
       seenCoords.add(coord)
     }
     if (lines.length) blocks.push({ id, lines })
@@ -875,7 +882,38 @@ export function buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleConte
       placeholders.push({ id, key, value: String(value) })
     }
   }
-  return { blocks, placeholders, warnings }
+  return { blocks, placeholders, warnings, normalizations: [...normalizations.values()] }
+}
+
+// 工程里已有的伞包依赖行就地改写成子库 (不碰自己生成的块: 那些块每次都会按新依赖重写)
+function normalizePluginDependencies(content, normalizations) {
+  const removed = []
+  const added = []
+  if (!normalizations.length) return { content, removed, added }
+  const eol = content.includes('\r\n') ? '\r\n' : '\n'
+  const lines = content.split(/\r?\n/)
+  let inside = false
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]
+    if (/^[ \t]*\/\/ 原生插件(.+?)(?:所需库|占位符)-开始 \(自动生成, 勿手改\)/.test(line)) {
+      inside = true
+      continue
+    }
+    if (inside) {
+      if (/^[ \t]*\/\/ 原生插件(.+?)(?:所需库|占位符)-结束[ \t]*$/.test(line)) inside = false
+      continue
+    }
+    // 只改依赖声明行, 注释或其它地方的伞包坐标不动
+    if (!/^[ \t]*(implementation|api|compileOnly|runtimeOnly)\b/.test(line)) continue
+    for (const { from, to } of normalizations) {
+      if (!line.includes(`${from}:`)) continue
+      lines[i] = line.replace(new RegExp(escapeRegExp(from), 'g'), to)
+      removed.push(line.trim())
+      added.push(lines[i].trim())
+      break
+    }
+  }
+  return { content: lines.join(eol), removed, added }
 }
 
 // 统计一行里未被字符串/注释包裹的 { 与 } 数量, 用于找 dependencies { } 的收尾行
@@ -1009,29 +1047,28 @@ export function updateAndroidPluginGradle({ appDir, webAppDir, nativePlugins }) 
   if (!fs.existsSync(file)) return { warnings: [], added: [], removed: [] }
 
   const raw = fs.readFileSync(file, 'utf8')
-  const { blocks, placeholders, warnings } = buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleContent: raw })
-  if (!blocks.length && !placeholders.length) {
-    // 没有要写的内容时只清掉自己以前写的块
-    const result = applyAndroidPluginGradle(raw, { blocks: [], placeholders: [] })
-    if (result.brokenMark) {
-      warnings.push('build.gradle 里有未闭合的 uapp 标记块（缺少 -结束 行），为避免破坏文件未写入，请检查')
-      return { warnings, added: [], removed: [] }
-    }
-    if (result.content !== raw) fs.writeFileSync(file, result.content)
-    return { warnings, added: [], removed: result.removed }
+  const { blocks, placeholders, warnings, normalizations } = buildAndroidPluginGradle({ webAppDir, nativePlugins, gradleContent: raw })
+  // 工程里已有的伞包依赖先就地改写成子库, 再让去重看到的是子库坐标
+  const migrated = normalizePluginDependencies(raw, normalizations)
+  for (const item of normalizations) {
+    warnings.push(`原生插件 ${item.id}: 依赖 ${item.from} 是聚合包（本身没有类），已改写为 ${item.to}，避免多拉 login/share 等用不到的模块`)
   }
-
-  const result = applyAndroidPluginGradle(raw, { blocks, placeholders })
+  const base = migrated.content
+  const result = applyAndroidPluginGradle(base, { blocks, placeholders })
   if (result.brokenMark) {
     warnings.push('build.gradle 里有未闭合的 uapp 标记块（缺少 -结束 行），为避免破坏文件未写入，请检查')
     return { warnings, added: [], removed: [] }
   }
-  if (result.depsSkipped) {
+  if (blocks.length && result.depsSkipped) {
     warnings.push('build.gradle 里没有找到 dependencies { }，插件依赖未写入')
   }
-  if (result.placeholderSkipped) {
+  if (placeholders.length && result.placeholderSkipped) {
     warnings.push('build.gradle 里没有找到 manifestPlaceholders = [ ]，插件参数未写入')
   }
   if (result.content !== raw) fs.writeFileSync(file, result.content)
-  return { warnings, added: result.added, removed: result.removed }
+  return {
+    warnings,
+    added: [...migrated.added, ...result.added],
+    removed: [...migrated.removed, ...result.removed]
+  }
 }
