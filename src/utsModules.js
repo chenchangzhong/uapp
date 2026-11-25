@@ -189,9 +189,12 @@ ${abiFilters ? `
         sourceCompatibility JavaVersion.VERSION_11
         targetCompatibility JavaVersion.VERSION_11
     }
+}
 
-    kotlinOptions {
-        jvmTarget = '11'
+// Kotlin 2.2 起 android.kotlinOptions 升级为 error, 改用顶层 compilerOptions
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11)
     }
 }
 
@@ -723,9 +726,11 @@ export function updateAndroidUtsModules({ appDir, webAppDir }) {
 
     const lines = androidConfigDeps(plugin.config)
     lines.push(`implementation project(':${moduleName}')`)
-    // 模块内 libs 只对模块自身编译可见 (aar 用 compileOnly, jar 不参与编译),
-    // 要打进 apk 必须在 app 侧再引用一次; 多个插件共用同一 fileTree 时 Gradle 会自动去重
-    lines.push(`implementation fileTree(dir: rootProject.file('${moduleName}/libs'), include: ['*.aar', '*.jar'])`)
+    // 上游文档: uts 插件的本地 libs 依赖同样需要添加到主模块 (模块内是 compileOnly, 不参与打包);
+    // 但插件没有 libs 时不能凭空写一条空 fileTree, 否则主工程多出一条指向不存在目录的依赖
+    if (listFiles(path.join(moduleDir, 'libs')).some((rel) => /\.(aar|jar)$/i.test(rel))) {
+      lines.push(`implementation fileTree(dir: rootProject.file('${moduleName}/libs'), include: ['*.aar', '*.jar'])`)
+    }
     blocks.push({ id: plugin.id, lines })
   }
 
