@@ -142,6 +142,8 @@ uapp new YourProject
     // 分平台 appid (选填), 未填时逐级回退: uapp.appid -> 根节点 appid
     "android.appid": "android 的 appid",
     "android.appkey": "申请并替换为 android dcloudkey",
+    // aab 想用另一套 appkey 时再填, 未填回退 android.appkey (包名共用)
+    "android.aab.appkey": "aab 专用的 dcloudkey (选填)",
     "ios": {
       // base / release 必填; test / sim 未填的字段回退 base
       "appid": "ios 的 appid (选填, 未填回退根节点 appid)",
@@ -317,6 +319,7 @@ uapp run build:app release
     "package": "com.code0xff.uapp",
     "android.appid": "__UNI__ANDROID1",
     "android.appkey": "b4ab7d1c668cbb3b257aeeabd75c29da",
+    "android.aab.appkey": "aab 专用的 dcloudkey (选填, 未填回退 android.appkey)",
     "ios": {
       "appid": "__UNI__IOS1",
       "base": { "package": "com.code0xff.uapp", "appkey": "aa215ff1522abe39cb7ccec5943eeb92" },
@@ -368,6 +371,11 @@ test 包的导出配置跟随 `uapp.ios.test.export`: `dev`（默认，共用 `c
 或 `own`（用工程里自己的 `config/export_test.plist`，适合测试包 ad-hoc + 正式包 App Store 这类
 method 不同的场景）。
 
+Android 的 appkey 只有 aab 可以单独配（只区分 appkey, 包名共用）: apk（含 dev / 各渠道）固定用
+`uapp.android.appkey`, aab 可另填 `uapp.android.aab.appkey`, 未填时回退 `uapp.android.appkey`
+（不配 aab 就是"不区分, 共用一个"）。
+构建时会把本次构建用的 key 写进 `app/build.gradle` 的 `DCLOUD_APPKEY`, 所以 apk 与 aab 交替构建不会互相残留.
+
 custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json 的同级目录，支持加 ../定位上一级目录，避免用绝对路径。
 </blockquote>
 
@@ -378,7 +386,8 @@ custom.command 参数内，可以使用 `${SRC}, ${SRC}` 为当前 manifest.json
 | name           | 已废弃, 不再读取。APP名字统一取根节点的 name（根 name 必填, 缺失时打包报错）                          |
 | package        | 应用的包名（Android 使用）。不同平台可以加前缀区分，如 android.package。iOS 见 uapp.ios.*                                 |
 | android.appid / ios.appid | (选填) 分平台 DCloud appid。没填时逐级回退 `uapp.appid` -> 根节点 `appid`，两个平台可各用一套 appid + appkey                       |
-| android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey，下方有申请地址                                           |
+| android.appkey | DCloud平台申请的，Android 平台 dcloud_appkey（apk 固定用它，aab 未单独配置时也用它），下方有申请地址                                           |
+| android.aab.appkey | (选填) aab 专用的 appkey，未填回退 `android.appkey`（只区分 appkey，包名共用）。`uapp run build:app aab` 会在构建前把该 key 写入 build.gradle，apk / dev / 各渠道构建则写入 `android.appkey` |
 | ios.base / ios.test / ios.sim / ios.release | iOS 每个构建类型的 `{ package, appkey, googleClientId }`。base / release 必填；test / sim 未填的字段回退 base。`googleClientId` 是 Google 登录的 iOS client id（正式包不填，沿用 `app-plus.distribute.sdkConfigs.oauth.google.clientid`）。`ios.test.export` 可选 `dev`(默认) / `release` / `own`，决定测试包用哪份导出配置 |
 | versionName    | App版本名，同上可以加前缀区分不同平台。如 android.versionName                                             |
 | versionCode    | App版本Code，同上可以加前缀区分不同平台。如 ios.versionCode                                              |

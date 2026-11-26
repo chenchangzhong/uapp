@@ -499,6 +499,14 @@ export default function (inputArgs) {
           aab: 'bundleRelease'
         }
         const gradle = process.platform === 'win32' ? 'gradlew.bat' : './gradlew'
+        if (buildType !== 'apk:all' && !assembleTypeMap[buildType]) {
+          process.exitCode = 1
+          console.log(chalk.red(`无效的构建类型: ${buildType}`))
+          console.log('示例: dev, dev:huawei, apk, apk:huawei, apk:all, aab 等')
+          return
+        }
+        // 构建前写 appkey: apk (含 dev / 各渠道) 固定用 android.appkey, aab 可用 android.aab.appkey 单配
+        updateAndroidAppkey(buildType)
         if (buildType === 'apk:all') {
           const channels = ['origin', 'huawei', 'honor', 'xiaomi', 'vivo', 'oppo', 'meizu']
           for (const ch of channels) {
@@ -511,12 +519,6 @@ export default function (inputArgs) {
           console.log('\n编译成功，安装包位置: ')
           console.log(path.join($G.appDir, 'app/build/outputs/apk/'))
         } else {
-          if (!assembleTypeMap[buildType]) {
-            process.exitCode = 1
-            console.log(chalk.red(`无效的构建类型: ${buildType}`))
-            console.log('示例: dev, dev:huawei, apk, apk:huawei, apk:all, aab 等')
-            return
-          }
           const isDev = buildType.includes('dev')
           const channel = buildType.split(':')[1] || 'origin'
           const outFileMap = {
@@ -773,7 +775,8 @@ function loadManifest() {
 "uapp": {
   "package": "com.code0xff.uapp",
   "android.appid": "android 的 appid (选填, 未填回退根节点 appid)",
-  "android.appkey": "申请并替换为 android dcloudkey",
+  "android.appkey": "apk / aab 共用的 dcloudkey",
+  "android.aab.appkey": "aab 专用 dcloudkey (选填, 未填回退 android.appkey)",
   "ios": {
     "appid": "ios 的 appid (选填, 未填回退根节点 appid)",
     "base": { "package": "com.code0xff.uapp", "appkey": "base 的 dcloudkey (必填)" },
@@ -800,6 +803,7 @@ function loadManifest() {
     }
   } else {
     $G.manifest.uapp.package = $G.manifest.uapp[`${$G.projectType}.package`] || $G.manifest.uapp.package || ''
+    // Android 的 aab 可以单配 appkey, 这里先存共用值 (apk 用), 写入前由 resolveAndroidAppkey 决定
     $G.manifest.uapp.appkey = $G.manifest.uapp[`${$G.projectType}.appkey`] || ''
   }
 
@@ -912,7 +916,8 @@ function prepareCommand() {
   }
 
   if ($G.projectType === 'android') {
-    updateAndroidMetaData()
+    // prepare 带构建类型时 aab 取专用 key; 单独 prepare 只写共用值, 构建前会再切一次
+    updateAndroidMetaData(buildType)
   } else if ($G.projectType === 'ios') {
     updateIOSMetaData()
   }
@@ -944,7 +949,31 @@ function prepareCommand() {
  * android platform
  */
 
-function updateAndroidMetaData() {
+// Android 只有 aab 能单独配 appkey: aab 取 android.aab.appkey, 未填回退 android.appkey;
+// apk (含 dev / 各渠道) 固定用 android.appkey
+function resolveAndroidAppkey(buildType) {
+  const scoped = buildType === 'aab' ? $G.manifest.uapp['android.aab.appkey'] : ''
+  return String(scoped || $G.manifest.uapp['android.appkey'] || '').trim()
+}
+
+// build.gradle 里的 DCLOUD_APPKEY 只有一份, 每次构建前都要切成本次构建的 key:
+// prepare 可以 --no-prepare 跳过, 且上一次 aab 构建写入的 key 会残留到 apk 构建
+function updateAndroidAppkey(buildType) {
+  const baseGradleFile = path.join($G.appDir, 'app/build.gradle')
+  if (!fs.existsSync(baseGradleFile)) return
+  const content = fs.readFileSync(baseGradleFile, 'utf8')
+  const updated = replaceAndroidAppkey(content, buildType)
+  if (updated !== content) {
+    fs.writeFileSync(baseGradleFile, updated)
+  }
+}
+
+function replaceAndroidAppkey(content, buildType) {
+  // 只认闭引号, 兼容最后一项没有尾逗号、行尾带注释的写法
+  return content.replace(/("DCLOUD_APPKEY"\s*:\s*")([^"]*)(")/, '$1' + resolveAndroidAppkey(buildType) + '$3')
+}
+
+function updateAndroidMetaData(buildType = '') {
   let wxEntryActivityFile = 'WXEntryActivity.java'
   let wXPayEntryActivityFile = 'WXPayEntryActivity.java'
   let versionName = normalizeVersionName($G.manifest.uapp.versionName)
@@ -957,7 +986,7 @@ function updateAndroidMetaData() {
   content = content.replace(/(app_name'\s*,\s*")(.*)(")/, '$1' + $G.manifest.uapp.name + '$3')
   content = content.replace(/(versionCode\s*(?:=\s*)?)(\d+)/, '$1' + $G.manifest.uapp.versionCode)
   content = content.replace(/(versionName\s*(?:=\s*)?")(.*)(")/, '$1' + versionName + '$3')
-  content = content.replace(/("DCLOUD_APPKEY"\s*:\s*")(.*)(",)/, '$1' + $G.manifest.uapp.appkey + '$3')
+  content = replaceAndroidAppkey(content, buildType)
   content = updateAndroidSdkVersions(content)
 
   const weixin = $G.manifest['app-plus']?.distribute?.sdkConfigs?.oauth?.weixin
@@ -3374,11 +3403,15 @@ function printManifestInfo() {
       const note = inherited.length > 0 ? ` (${inherited.join(' / ')} 回退 base)` : ''
       console.log(`- ios.${buildType.padEnd(8)}: ${config.package || '(未配置)'} / ${config.appkey || '(未配置)'}${note}`)
     })
-  } else {
+  } else if ($G.projectType === 'android') {
     console.log('- package     : ' + $G.manifest.uapp.package)
-    if ($G.manifest.uapp.appkey) {
-      console.log('- appKey      : ' + $G.manifest.uapp.appkey)
-    }
+    console.log('- appKey(apk) : ' + ($G.manifest.uapp.appkey || '(未配置)'))
+    const aabScoped = String($G.manifest.uapp['android.aab.appkey'] || '').trim()
+    const aabAppkey = resolveAndroidAppkey('aab')
+    const note = aabAppkey && !aabScoped ? ' (回退 android.appkey)' : ''
+    console.log('- appKey(aab) : ' + (aabAppkey || '(未配置)') + note)
+  } else if ($G.manifest.uapp.appkey) {
+    console.log('- appKey      : ' + $G.manifest.uapp.appkey)
   }
   console.log('- versionName : ' + $G.manifest.uapp.versionName)
   console.log('- versionCode : ' + $G.manifest.uapp.versionCode)
@@ -3387,7 +3420,9 @@ function printManifestInfo() {
   console.log()
   const appkeyKey = $G.projectType === 'ios'
     ? `uapp.ios.${$G.args.argv.remain[2] || 'base'}.appkey`
-    : `uapp.${$G.projectType}.appkey`
+    : $G.projectType === 'android'
+      ? 'uapp.android.appkey (apk 用, aab 未单独配置时共用) / uapp.android.aab.appkey'
+      : `uapp.${$G.projectType}.appkey`
   console.log(`👇 DCloud 开发者后台配置 dcloud_appkey (${appkeyKey}): `)
   console.log('https://dev.dcloud.net.cn/pages/app/detail/info?tab=package&appid=' + $G.manifest.uapp.appid)
   console.log()
