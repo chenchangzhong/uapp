@@ -26,7 +26,7 @@ import { printIOSSigningInfo } from './ios-signing.js'
 import { isPodSDKRoot, resolvePodSDKRoot, ensurePodSDKFiles, ensureSignedGoogleFrameworks, podSubspecs, writePodfile, runPodInstall, readIOSTargets, CORE_MOTION_SUBSPECS } from './ios-pods.js'
 import stripJsonComments from './stripJsonComments.js'
 import fsExtra from 'fs-extra'
-const { emptyDirSync, removeSync, pathExistsSync } = fsExtra
+const { emptyDirSync, pathExistsSync } = fsExtra
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import readline from 'readline/promises'
@@ -888,6 +888,34 @@ function renameApkArtifact(file, channel, isDev) {
   return target
 }
 
+// 自定义基座不带项目资源, 但必须留一份版本标记: HBuilderX 通过
+// assets/apps/<appid>/www/manifest.json 读取基座版本 (getAppManifestJson),
+// 读不到时基座版本为空, 版本比较恒不相等, 每次运行都会重装基座.
+function writeBaseVersionManifest(embedAppsDir) {
+  const appid = $G.manifest.uapp.appid
+  const versionName = normalizeVersionName($G.manifest.uapp.versionName)
+  const versionCode = $G.manifest.uapp.versionCode
+  // HBuilderX 只比较 version.name; code 只是清单里的配套字段, 缺失时补 0 即可
+  if (!appid || !versionName) {
+    return false
+  }
+  const manifestFile = path.join(embedAppsDir, appid, 'www', 'manifest.json')
+  fs.mkdirSync(path.dirname(manifestFile), { recursive: true })
+  fs.writeFileSync(
+    manifestFile,
+    JSON.stringify(
+      {
+        id: appid,
+        name: $G.manifest.name || '',
+        version: { name: String(versionName), code: Number(versionCode) || 0 }
+      },
+      null,
+      2
+    ) + '\n'
+  )
+  return true
+}
+
 function prepareCommand() {
   let compiledDir = getBuildOut()
   const buildType = $G.args.argv.remain[2] || ''
@@ -927,7 +955,22 @@ function prepareCommand() {
     $G.projectType === 'ios' ? 'Main/Pandora/apps' : 'app/src/main/assets/apps'
   )
   if (buildType.includes('dev') || ['base', 'sim'].includes(buildType)) {
-    removeSync(path.join(embedAppsDir, $G.manifest.uapp.appid))
+    // 自定义基座不带项目资源: 清空整个 apps 目录, 而不是只删当前 appid 目录.
+    // 历史构建残留的 <appid>/www 曾被打进基座, 导致 control.xml 的 appid 与
+    // 实际 www 目录不一致、基座版本号取自残留 www.
+    // 保留点文件 (.gitkeep): 工程目录是 git 仓库时, 删掉会让工作区多出删除记录
+    if (fs.existsSync(embedAppsDir)) {
+      for (const entry of fs.readdirSync(embedAppsDir)) {
+        if (entry.startsWith('.')) continue
+        fs.rmSync(path.join(embedAppsDir, entry), { recursive: true, force: true })
+      }
+    }
+    // 版本标记只有 Android 侧读 (assets/apps/<appid>/www/manifest.json), iOS 的基座版本在 Info.plist 里
+    if ($G.projectType !== 'ios' && !writeBaseVersionManifest(embedAppsDir)) {
+      console.log(
+        chalk.yellow('⚠️ 基座版本标记未写入 (appid/versionName 缺失), HBuilderX 每次运行都可能重装自定义基座')
+      )
+    }
   } else {
     const embedWwwDir = path.join(embedAppsDir, $G.manifest.uapp.appid, 'www')
     emptyDirSync(embedAppsDir)
@@ -964,6 +1007,7 @@ function updateAndroidAppkey(buildType) {
   const content = fs.readFileSync(baseGradleFile, 'utf8')
   const updated = replaceAndroidAppkey(content, buildType)
   if (updated !== content) {
+    snapshotAndroidAppkey(baseGradleFile, content)
     fs.writeFileSync(baseGradleFile, updated)
   }
 }
@@ -973,6 +1017,36 @@ function replaceAndroidAppkey(content, buildType) {
   return content.replace(/("DCLOUD_APPKEY"\s*:\s*")([^"]*)(")/, '$1' + resolveAndroidAppkey(buildType) + '$3')
 }
 
+// appkey 只是打包时临时写进 build.gradle, 构建结束(含构建失败/提前退出)要还原成打包前的值,
+// 否则工作区的 build.gradle 会停留在某次构建的 key 上
+let androidAppkeyOriginal = null
+
+function snapshotAndroidAppkey(file, content) {
+  if (androidAppkeyOriginal) return
+  const match = content.match(/"DCLOUD_APPKEY"\s*:\s*"([^"]*)"/)
+  if (!match) return
+  androidAppkeyOriginal = { file, value: match[1] }
+  process.once('exit', restoreAndroidAppkey)
+}
+
+function restoreAndroidAppkey() {
+  const original = androidAppkeyOriginal
+  if (!original) return
+  androidAppkeyOriginal = null
+  try {
+    if (!fs.existsSync(original.file)) return
+    const content = fs.readFileSync(original.file, 'utf8')
+    const updated = content.replace(
+      /("DCLOUD_APPKEY"\s*:\s*")([^"]*)(")/,
+      (match, prefix, current, suffix) =>
+        current === original.value ? match : prefix + original.value + suffix
+    )
+    if (updated !== content) fs.writeFileSync(original.file, updated)
+  } catch {
+    // 退出阶段还原失败不应该影响进程退出码
+  }
+}
+
 function updateAndroidMetaData(buildType = '') {
   let wxEntryActivityFile = 'WXEntryActivity.java'
   let wXPayEntryActivityFile = 'WXPayEntryActivity.java'
@@ -980,6 +1054,7 @@ function updateAndroidMetaData(buildType = '') {
 
   let baseGradleFile = path.join($G.appDir, 'app/build.gradle')
   let content = fs.readFileSync(baseGradleFile, 'utf8')
+  snapshotAndroidAppkey(baseGradleFile, content)
 
   content = content.replace(/(namespace\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.package + '$3')
   content = content.replace(/(applicationId\s*(?:=\s*)?")(.*)(")/, '$1' + $G.manifest.uapp.package + '$3')
@@ -1448,6 +1523,23 @@ function requireIOSConfig(buildType) {
   return config
 }
 
+// HBuilderX 从基座 Payload/<App>.app/HXDependencies 生成 UTS 编译缓存 (ensureCustomBaseCache):
+// 目录里没有内容时缓存建不起来, 它每轮都会重新编译 UTS 插件 → 注入基座 → 重新签名.
+// HBuilderX 自己的标准基座与云打包基座都带 app-ios-debug.json, uapp 模板早期只有 .gitkeep,
+// 老工程的 ios 目录是模板的一次性复制, 所以这里按目标路径补一份 (已存在则不动)
+function ensureIOSHXDependenciesMetadata() {
+  const relative = 'Main/Resources/AppDev/HXDependencies/app-ios-debug.json'
+  const target = path.join($G.appDir, relative)
+  if (fs.existsSync(target)) return
+  const source = [
+    path.join($G.sdkHomeDir, 'templates/ios', relative),
+    path.join(__dirname, '../uappsdk/templates/ios', relative)
+  ].find(file => fs.existsSync(file))
+  if (!source) return
+  fs.mkdirSync(path.dirname(target), { recursive: true })
+  fs.copyFileSync(source, target)
+}
+
 function updateIOSMetaData() {
   const rawBuildType = $G.args.argv.remain[2] || ''
   // uapp prepare 没有构建类型 (或沿用 android 的 dev), 无法确定 package/appkey, 只做与类型无关的更新
@@ -1471,6 +1563,10 @@ function updateIOSMetaData() {
     console.log(chalk.yellow('未指定 iOS 构建类型，跳过包名 / appkey 写入'))
     console.log('打包请用 uapp run build:app-plus base|test|sim|release')
   }
+
+  // HBuilderX 运行时以基座 HXDependencies 判断 UTS 缓存是否有效; 缺这个文件时它每次运行
+  // 都会重新注入 UTS framework 再重签自定义基座. 老工程是模板的复制, 不会自动补, 这里兜底
+  ensureIOSHXDependenciesMetadata()
 
   let sdkLinkDir = path.join($G.appDir, '/SDKs/SDK')
   if (!fs.existsSync(sdkLinkDir)) {
@@ -3276,6 +3372,11 @@ function prepareIOSNativePlugins(plugins) {
     appDir: $G.appDir,
     webAppDir: $G.webAppDir,
   })
+  if (utsYml.errors.length) {
+    utsYml.errors.forEach((error) => console.log(chalk.red(error)))
+    console.log(chalk.red('❌ UTS 插件产物不完整，打包中止'))
+    process.exit(1)
+  }
   const pluginYml = buildIOSNativePluginYml(plugins)
   updateIOSCustomYml(mergeIOSYml(moduleYml, pluginYml, utsYml))
   const featurePatch = patchFeaturePlist({

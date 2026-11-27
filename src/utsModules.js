@@ -4,10 +4,11 @@
 // 按 unpackage/resources/uni_modules/<id>/utssdk/<platform>/ 下的编译产物集成:
 // - android: 生成 uniplugin_<id> library 模块, 接线 settings.gradle / build.gradle
 //            模块内写入同步账本 .uapp-uts.json, 之后按账本增量刷新; 用户手改过的模块保持不动
-// - ios:     扫 utsplugins/<id>/ 下编译好的 framework, 写入 config/custom.yml
+// - ios:     扫 utsplugins/<id>/ 下编译好的 framework, 按官方规则统一命名 (unimodule+驼峰), 写入 config/custom.yml
 //
 // 只处理「源码里还在」的插件: 导出目录有、uni_modules 源码没有的残留只警告不集成。
 
+import { execFileSync } from 'child_process'
 import crypto from 'crypto'
 import fs from 'fs'
 import path from 'path'
@@ -101,7 +102,17 @@ export function listUtsPlugins({ webAppDir }) {
   const result = { android: [], ios: [], warnings: [] }
   const sourceDir = path.join(webAppDir, 'uni_modules')
   const exportDir = path.join(webAppDir, EXPORT_DIR)
-  if (!fs.existsSync(sourceDir) || !fs.existsSync(exportDir)) return result
+  if (!fs.existsSync(sourceDir)) return result
+  if (!fs.existsSync(exportDir)) {
+    // 源码里有 UTS 插件、导出目录却不在, 结果会是「基座里没这个插件」而非报错, 这里必须说清
+    const sourceIds = fs.readdirSync(sourceDir).filter((id) => fs.existsSync(path.join(sourceDir, id, 'utssdk')))
+    if (sourceIds.length) {
+      result.warnings.push(
+        `UTS插件集成已跳过: 找不到 ${EXPORT_DIR} (源码里有 ${sourceIds.join(', ')}); 先用 HBuilderX 运行一次导出资源, 或确认 unpackage 是否被清理`
+      )
+    }
+    return result
+  }
 
   for (const id of fs.readdirSync(exportDir).sort()) {
     const exported = path.join(exportDir, id, 'utssdk')
@@ -803,12 +814,10 @@ function syncUtsFrameworkFromExport({ dir, platformDir, id, warnings }) {
   }
   // 目标为空, 或导出目录的产物比目标里的新 (重新构建过) 都要同步;
   // cpSync 不保留源时间戳, 拷完目标更新, 下一轮不会重复拷
-  const staleFramework = source && frameworkNamesIn(source).some((name) => {
-    const target = path.join(dir, name)
-    if (!fs.existsSync(target)) return true
-    return fs.statSync(path.join(source, name)).mtimeMs > fs.statSync(target).mtimeMs
-  })
-  if (source && (!dirHasFramework || staleFramework)) {
+  // 比的是两边最新 framework 的时间: 改名后两边文件名不同, 按名字比会每轮都判定过期
+  const newestMtime = (root) =>
+    Math.max(0, ...frameworkNamesIn(root).map((name) => fs.statSync(path.join(root, name)).mtimeMs))
+  if (source && (!dirHasFramework || newestMtime(source) > newestMtime(dir))) {
     fs.mkdirSync(dir, { recursive: true })
     for (const name of frameworkNamesIn(source)) {
       fs.rmSync(path.join(dir, name), { recursive: true, force: true })
@@ -836,10 +845,171 @@ function syncUtsFrameworkFromExport({ dir, platformDir, id, warnings }) {
   }
 }
 
+// 官方文档的 framework 命名规则: unimodule + 插件名驼峰 (- 分段首字母大写),
+// 例如 open-safari-view -> unimoduleOpenSafariView
+// (https://doc.dcloud.net.cn/uni-app-x/native/use/iosuts.html)
+// HBuilderX 运行时会按这个名字判断插件是否已经编进基座, 名字不符就走本地编译并重建基座,
+// 而重建基座必然破坏签名, 于是每次运行都要重新签名
+export function utsFrameworkName(id) {
+  return 'unimodule' + camelUtsId(id)
+}
+
+function camelUtsId(id) {
+  return id
+    .split('-')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join('')
+}
+
+// 产物里的 framework 名是构建时随手定的 (比如 unimoduleUtsOpenSafariView), 统一改成官方规则的名字。
+// 目录里可能同时存在新旧两份 (换命名前提交过, 换命名后又同步了新产物), 只保留最新的一份;
+// 否则后处理的旧名会把先同步的新产物 rmSync 掉, 打完包用的是旧模块
+function normalizeUtsFrameworkName({ dir, id, warnings, errors }) {
+  const expected = utsFrameworkName(id)
+  const target = `${expected}.framework`
+  const targetPath = path.join(dir, target)
+  const renameFrom = pickFrameworkToRename({ dir, id, target, warnings })
+  if (renameFrom) {
+    fs.renameSync(path.join(dir, renameFrom), targetPath)
+    warnings.push(`UTS插件 ${id}: framework 已按官方规则改名 ${renameFrom} -> ${target}`)
+  }
+  if (!fs.existsSync(targetPath)) return
+  const oldBase = currentFrameworkBase(targetPath)
+  if (!oldBase) {
+    errors.push(`UTS插件 ${id}: ${target} 里找不到可执行文件, 打包后无法加载`)
+    return
+  }
+  if (oldBase !== expected) {
+    alignFrameworkInternals({ frameworkDir: targetPath, id, oldBase, expected, warnings, errors })
+    warnings.push(`UTS插件 ${id}: framework 内部命名已对齐 ${oldBase} -> ${expected}`)
+  } else {
+    // 名字已经是官方名, 但历史上只改过外层名字的产物内部可能还是旧名, 这里补齐
+    alignInstallName({ frameworkDir: targetPath, id, expected, warnings, errors })
+    const staleBase = detectStaleModuleBase(targetPath, expected)
+    if (staleBase) {
+      alignFrameworkInternals({ frameworkDir: targetPath, id, oldBase: staleBase, expected, warnings, errors })
+      warnings.push(`UTS插件 ${id}: framework 内部命名已对齐 ${staleBase} -> ${expected}`)
+    }
+  }
+  if (!fs.existsSync(path.join(targetPath, expected))) {
+    errors.push(`UTS插件 ${id}: ${target} 里没有名为 ${expected} 的可执行文件, 打包后无法加载`)
+  }
+}
+
+// 同一插件的 framework 可能因换过命名而重名: 返回需要改名为官方名的那份, 其余同模块旧名一并清掉
+function pickFrameworkToRename({ dir, id, target, warnings }) {
+  const targetPath = path.join(dir, target)
+  const duplicates = fs.readdirSync(dir)
+    .filter((entry) => entry.endsWith('.framework') && entry !== target && isSameFrameworkModule(entry, id))
+    .map((name) => ({ name, time: fs.statSync(path.join(dir, name)).mtimeMs }))
+    .sort((a, b) => b.time - a.time)
+  if (!duplicates.length) return ''
+  let renameFrom = ''
+  if (!fs.existsSync(targetPath)) {
+    renameFrom = duplicates.shift().name
+  } else if (fs.statSync(targetPath).mtimeMs < duplicates[0].time) {
+    // 官方名那份是旧的: 用最新的一份覆盖
+    renameFrom = duplicates.shift().name
+    fs.rmSync(targetPath, { recursive: true, force: true })
+    warnings.push(`UTS插件 ${id}: 官方名那份比 ${renameFrom} 旧, 已用后者覆盖`)
+  }
+  if (duplicates.length) {
+    for (const { name } of duplicates) fs.rmSync(path.join(dir, name), { recursive: true, force: true })
+    warnings.push(`UTS插件 ${id}: 已清理重复的旧 framework`)
+  }
+  return renameFrom
+}
+
+// 同一插件的产物只可能是两个名字: 官方规则名, 或 uapp 历史上的 unimoduleUts<Name>;
+// 按插件 id 精确算出来比对, 避免「去掉 uts 再比」把不同插件误判成同一个
+function isSameFrameworkModule(name, id) {
+  const base = name.slice(0, -'.framework'.length)
+  return base === utsFrameworkName(id) || base === 'unimoduleUts' + camelUtsId(id)
+}
+
+// framework 的可执行文件名以 Info.plist 的 CFBundleExecutable 为准, 避免把 .DS_Store 之类的杂文件当二进制
+function currentFrameworkBase(frameworkDir) {
+  const plist = path.join(frameworkDir, 'Info.plist')
+  if (fs.existsSync(plist)) {
+    try {
+      const name = execFileSync('plutil', ['-extract', 'CFBundleExecutable', 'raw', plist], { encoding: 'utf8' }).trim()
+      if (name) return name
+    } catch {
+      // 读不出就退回按文件猜
+    }
+  }
+  for (const entry of fs.readdirSync(frameworkDir)) {
+    if (entry.startsWith('.')) continue
+    const full = path.join(frameworkDir, entry)
+    if (fs.statSync(full).isFile() && entry !== 'Info.plist' && entry !== 'config.json') return entry
+  }
+  return ''
+}
+
+// 外层已是官方名、内部仍是旧名的情况 (改名中途失败留下的残留): 从 modulemap 里读回旧名
+function detectStaleModuleBase(frameworkDir, expected) {
+  const modulemap = path.join(frameworkDir, 'Modules', 'module.modulemap')
+  if (!fs.existsSync(modulemap)) return ''
+  const match = /module\s+(\w+)\s*\{/.exec(fs.readFileSync(modulemap, 'utf8'))
+  return match && match[1] !== expected ? match[1] : ''
+}
+
+// 动态库的 install name 必须与 framework 名一致, 否则链接后运行期会 image not found
+function alignInstallName({ frameworkDir, id, expected, warnings, errors }) {
+  if (process.platform !== 'darwin') return
+  const binary = path.join(frameworkDir, expected)
+  if (!fs.existsSync(binary)) return
+  try {
+    execFileSync('install_name_tool', ['-id', `@rpath/${expected}.framework/${expected}`, binary], { stdio: 'ignore' })
+  } catch {
+    errors.push(`UTS插件 ${id}: framework 的 install name 未能改成 @rpath/${expected}.framework/${expected}, 打出来的包会启动失败`)
+  }
+}
+
+// 只改目录名不够: 二进制、modulemap、Headers、swiftmodule、Info.plist 都要跟着改,
+// 否则 import <模块名> 时链接不到 (HBuilderX 自己编的产物这些字段全部是官方名)
+function alignFrameworkInternals({ frameworkDir, id, oldBase, expected, warnings, errors }) {
+  const binary = path.join(frameworkDir, oldBase)
+  if (fs.existsSync(binary)) fs.renameSync(binary, path.join(frameworkDir, expected))
+  alignInstallName({ frameworkDir, id, expected, warnings, errors })
+  for (const sub of ['Headers', 'Modules']) {
+    const subDir = path.join(frameworkDir, sub)
+    if (!fs.existsSync(subDir)) continue
+    for (const entry of fs.readdirSync(subDir)) {
+      if (entry.startsWith('.') || !entry.startsWith(oldBase)) continue
+      fs.renameSync(path.join(subDir, entry), path.join(subDir, expected + entry.slice(oldBase.length)))
+    }
+  }
+  const modulemap = path.join(frameworkDir, 'Modules', 'module.modulemap')
+  if (fs.existsSync(modulemap)) {
+    const content = fs.readFileSync(modulemap, 'utf8')
+    const updated = content.split(oldBase).join(expected)
+    if (updated !== content) fs.writeFileSync(modulemap, updated)
+  }
+  for (const key of ['CFBundleExecutable', 'CFBundleName']) {
+    if (!setPlistString(path.join(frameworkDir, 'Info.plist'), key, expected)) {
+      errors.push(`UTS插件 ${id}: Info.plist 的 ${key} 未能改成 ${expected}, 打出来的包会加载失败`)
+    }
+  }
+}
+
+// Info.plist 是二进制 plist, 只能借 macOS 自带的 plutil 改 (iOS 打包本身也只能在 macOS 上跑)
+function setPlistString(file, key, value) {
+  if (!fs.existsSync(file) || process.platform !== 'darwin') return false
+  try {
+    execFileSync('plutil', ['-replace', key, '-string', value, file], { stdio: 'ignore' })
+    return true
+  } catch {
+    return false
+  }
+}
+
 // ios 侧: 扫 utsplugins/<id>/ 下的 framework, 生成 custom.yml 组
 // framework 已在 config/custom.yml 里配置过的组标记 skipped, 提示层据此区分「已写入/未改动」
 export function buildIOSUtsYml({ appDir, webAppDir }) {
   const { ios: plugins, warnings } = listUtsPlugins({ webAppDir })
+  const errors = []
   const groups = []
   const customYmlFile = path.join(appDir, 'config', 'custom.yml')
   const customYml = fs.existsSync(customYmlFile) ? fs.readFileSync(customYmlFile, 'utf8') : ''
@@ -848,6 +1018,8 @@ export function buildIOSUtsYml({ appDir, webAppDir }) {
     // 导出目录里有编译好的 framework 就直接同步过来, 只剩源码时给出可操作提示
     syncUtsFrameworkFromExport({ dir, platformDir: plugin.platformDir, id: plugin.id, warnings })
     if (!fs.existsSync(dir)) continue
+    // 名字要对齐官方规则, 否则 HBuilderX 认不出插件已编进基座, 每次运行都会重建基座并重签
+    normalizeUtsFrameworkName({ dir, id: plugin.id, warnings, errors })
     const frameworks = fs.readdirSync(dir).filter((name) => name.endsWith('.framework') && fs.statSync(path.join(dir, name)).isDirectory())
     const xcframeworks = fs.readdirSync(dir).filter((name) => name.endsWith('.xcframework'))
     for (const name of xcframeworks) {
@@ -870,5 +1042,5 @@ export function buildIOSUtsYml({ appDir, webAppDir }) {
       skipped: frameworks.length > 0 && frameworks.every((name) => customYml.includes(`utsplugins/${plugin.id}/${name}`))
     })
   }
-  return { groups, warnings }
+  return { groups, warnings, errors }
 }
